@@ -1,4 +1,4 @@
-use walkdir::WalkDir;
+/*use walkdir::WalkDir;
 use std::path::Path;
 
 mod markdown;
@@ -68,4 +68,87 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![greet, scan_markdown_files, cluster_markdown_files])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}*/
+
+/**************************************************************************************************************************************/.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+use tauri::command;
+use serde::de::DeserializeOwned;
+
+// Keep the Python process globally
+lazy_static! {
+    static ref PYTHON_BACKEND: Mutex<PythonBackend> = Mutex::new(PythonBackend::new());
 }
+
+struct PythonBackend {
+    child: Child,
+}
+
+impl PythonBackend {
+    fn new() -> Self {
+        let child = Command::new("python")
+            .arg(r"src-python\app.py") // path to your Python script
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to start Python.");
+
+        Self { child }
+    }
+
+    /// Generic send function: sends a string to Python and parses the JSON response
+    fn send_json<T: DeserializeOwned>(&mut self, data: &str) -> T {
+        // Write to Python stdin
+        let stdin = self.child.stdin.as_mut().expect("Failed to access stdin");
+        stdin.write_all(data.as_bytes()).expect("Failed to write to stdin");
+        stdin.write_all(b"\n").expect("Failed to write newline");
+        stdin.flush().expect("Failed to flush stdin");
+
+        // Read one line of output from Python stdout
+        let stdout = self.child.stdout.as_mut().expect("Failed to access stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut response = String::new();
+        reader.read_line(&mut response).expect("Failed to read line");
+
+        // Parse JSON response into the requested type
+        serde_json::from_str(&response).expect("Failed to parse JSON")
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![greet])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+/*
+#[tauri::command]
+fn greet(name: &str) -> String {
+    let mut backend = PYTHON_BACKEND.lock().unwrap();
+
+    // Build JSON message specifying which Python function to call
+    let payload = serde_json::json!({
+        "function": "greet",
+        "args": { "name": name }
+    });
+
+    // Send to Python and get response
+    let response: serde_json::Value = backend.send_json(&payload.to_string());
+
+    // Return the result as a string
+    response["result"].as_str().unwrap_or("error").to_string()
+
+fn main() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![greet])
+        .run(tauri::generate_context!())
+        .expect("error while running Tauri app");
+}
+
+}*/

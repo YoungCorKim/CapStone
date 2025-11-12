@@ -2,11 +2,11 @@ import os
 import json
 
 class Load_File:
-    def _inti_(self):
-        self.__vault = {}
+    def __init__(self):
         pass
+    
 
-    def _load_file(self, file_path: str):
+    def load_file(self, file_path: str):
         if not os.path.exists(file_path):
             return {"error": f"File not found: {file_path}"}
         
@@ -19,28 +19,32 @@ class Load_File:
             return {
                 "name": os.path.basename(file_path),
                 "path": os.path.abspath(file_path),
-                "content": content
+                "content" : content
             }
         except Exception as e:
             return {"error": str(e)}
-
+        
     def load_directory(self, path: str):
-        new_vault = {}  
+        if not os.path.exists(path):
+            return {"error": f"Directory does not exist: {path}"}
+
+        new_vault = {}
         try:
             for root, dirs, files in os.walk(path):
                 for file in files:
                     if file.endswith(".md"):
                         full_path = os.path.join(root, file)
-                        loaded_file = self._load_file(full_path)
-                        if "error" in file: 
+                        loaded_file = self.load_file(full_path)
+                        if "error" in loaded_file:
                             continue
                         new_vault[loaded_file["name"]] = loaded_file
-        except Exception as e:
-            return {"error": f"Fail to load directory: {path} ({str(e)})"}
-        
-        self.vault = new_vault
-        return{"successful": "File loaded successful"}
 
-    def get_vault(self):
-        return self.vault
+                        #print(loaded_file["name"])
+                        #print(loaded_file["path"])
+                        #print(loaded_file["content"])
+                        #print()
+        except Exception as e:
+            return {"error": f"Failed to load directory: {path} ({str(e)})"}
+
+        return new_vault
 

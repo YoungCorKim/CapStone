@@ -5,7 +5,7 @@ class Load_File:
     def __init__(self):
         pass
     
-
+    # Load a single file
     def load_file(self, file_path: str):
         if not os.path.exists(file_path):
             return {"error": f"File not found: {file_path}"}
@@ -24,6 +24,7 @@ class Load_File:
         except Exception as e:
             return {"error": str(e)}
         
+    # Load the directory
     def load_directory(self, path: str):
         if not os.path.exists(path):
             return {"error": f"Directory does not exist: {path}"}

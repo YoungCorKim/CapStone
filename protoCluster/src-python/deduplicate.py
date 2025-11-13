@@ -6,6 +6,8 @@ class Deduplicate:
     def __init__(self, api_key : str):
         self._markdown_files = {}
         
+    # Return a hashmap with key being the path of path of the file
+    # Value is the content of the file after deduplication
     def deduplicate(self, file_vault: Dict[str, Dict[str, str]]):
         # Keep track the file path of each file
         file_paths_by_id = {}

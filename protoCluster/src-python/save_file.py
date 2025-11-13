@@ -6,6 +6,7 @@ class Save_File:
     def __init__(self):
         pass
 
+    # Save a file
     def save_file(self, file_path: str, content: str, backup: bool = False):
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -21,6 +22,7 @@ class Save_File:
         except Exception as e:
             return {"error":f"Error saving file {path}: {e}"}
 
+    # Delete a file
     def delete_file(self, file_path: str):
         path = Path(file_path)
         if not path.exists():

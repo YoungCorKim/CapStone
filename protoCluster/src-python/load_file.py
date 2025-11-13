@@ -37,12 +37,8 @@ class Load_File:
                         loaded_file = self.load_file(full_path)
                         if "error" in loaded_file:
                             continue
-                        new_vault[loaded_file["name"]] = loaded_file
+                        new_vault[full_path] = loaded_file
 
-                        #print(loaded_file["name"])
-                        #print(loaded_file["path"])
-                        #print(loaded_file["content"])
-                        #print()
         except Exception as e:
             return {"error": f"Failed to load directory: {path} ({str(e)})"}
 

@@ -20,6 +20,8 @@ class Vault_Manager:
         self._vault = result
         return {"success": "File loaded successful"}
 
+    def get_vault(self):
+        return self._vault
 
     """
     Load content of a file from a given path

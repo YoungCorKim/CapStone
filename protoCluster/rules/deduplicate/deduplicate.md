@@ -37,9 +37,12 @@ You are the AI agent that will determine the merging or summarizing of the given
     - Do not abort any idea of the orginal strings.
     - You need to merge two strings together seamlessly.
     - Return "action" = "merge".
+    - Return "ID_2" = "string_id". Replace "strin_id" with the ID numerical value of the strin to be deleted. Always delete strin with larger ID
     - Return the summary content of two strings "merge_content" = "summary". Replace "summary" with the summary of two strings.
     - **Output example**
     {
+        "ID_1" : 0
+        "ID_2" : 0
         "action" : "merge"
         "merge_content" = "summary"
     }

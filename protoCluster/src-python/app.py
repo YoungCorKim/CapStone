@@ -2,13 +2,23 @@ from load_file import Load_File
 from save_file import Save_File
 from vault_manager import Vault_Manager
 from rule_manager import Rule_Manager
+from deduplicate import Deduplicate
 
-rule = Rule_Manager()
+load = Vault_Manager()
 
-result = rule.load_rule()
+load.load_directory(r"C:\Users\chuon\OneDrive\Documents\First Fault")
 
-print(result)
+vault = load.get_vault()
 
-#print(rule.get_rules_by_stage())
+print(vault.keys())
+
+dedu = Deduplicate("gpt-3.5-turbo")
+
+result = dedu.deduplicate(vault)
+
+for key, content in result.items():
+    print(key)
+    print(content)
+    print()
 
 

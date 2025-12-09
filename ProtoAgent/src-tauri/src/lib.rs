@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
+use async_openai::{
+    config::OpenAIConfig,
+    types::assistants::{
+        CreateMessageRequest, CreateRunRequest, CreateThreadRequest, MessageContent, MessageRole, RunStatus,
+    },
+    Client,
+};
+use std::env;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -44,6 +52,156 @@ pub struct MasterSummary {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// Helper function to read API key from config file
+fn get_openai_api_key() -> Result<String, String> {
+    // First try environment variable
+    if let Ok(key) = env::var("OPENAI_API_KEY") {
+        if !key.is_empty() && key != "YOUR_OPENAI_API_KEY_HERE" {
+            return Ok(key);
+        }
+    }
+    
+    // Then try config file (try multiple possible paths)
+    let possible_paths = vec![
+        "src-tauri/config.toml",
+        "config.toml",
+        "./config.toml",
+    ];
+    
+    for config_path_str in possible_paths {
+        let config_path = Path::new(config_path_str);
+        if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(config_path) {
+                if let Ok(config) = toml::from_str::<toml::Value>(&content) {
+                    if let Some(openai) = config.get("openai") {
+                        if let Some(api_key) = openai.get("api_key") {
+                            if let Some(key_str) = api_key.as_str() {
+                                if !key_str.is_empty() && key_str != "YOUR_OPENAI_API_KEY_HERE" {
+                                    return Ok(key_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Err("OpenAI API key not found. Please set OPENAI_API_KEY environment variable or configure it in src-tauri/config.toml".to_string())
+}
+
+// Helper function to read and combine markdown file contents
+fn read_markdown_contents(files: &[FileInfo]) -> Result<String, String> {
+    let mut combined_content = String::new();
+    
+    for file in files {
+        match fs::read_to_string(&file.path) {
+            Ok(content) => {
+                combined_content.push_str(&format!("\n\n--- File: {} ---\n\n", file.name));
+                combined_content.push_str(&content);
+            }
+            Err(e) => {
+                return Err(format!("Failed to read file {}: {}", file.path, e));
+            }
+        }
+    }
+    
+    Ok(combined_content)
+}
+
+// Helper function to call OpenAI Assistant API
+async fn call_openai_assistant(content: String) -> Result<String, String> {
+    let api_key = get_openai_api_key()?;
+    let assistant_id = "asst_OqCSPNDY3tWbYOUiFhpwMeiZ";
+    
+    // Create OpenAI client with API key and required OpenAI-Beta header
+    let config = OpenAIConfig::new()
+        .with_api_key(api_key)
+        .with_header("OpenAI-Beta", "assistants=v2")
+        .map_err(|e| format!("Failed to set OpenAI-Beta header: {}", e))?;
+    
+    let client = Client::with_config(config);
+    
+    // Create a thread
+    let thread_request = CreateThreadRequest {
+        messages: Some(vec![CreateMessageRequest {
+            role: MessageRole::User,
+            content: content.into(),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+    
+    let thread = client
+        .threads()
+        .create(thread_request)
+        .await
+        .map_err(|e| format!("Failed to create thread: {}", e))?;
+    
+    let thread_id = thread.id;
+    
+    // Create a run
+    let run_request = CreateRunRequest {
+        assistant_id: assistant_id.to_string(),
+        ..Default::default()
+    };
+    
+    let run = client
+        .threads()
+        .runs(&thread_id)
+        .create(run_request)
+        .await
+        .map_err(|e| format!("Failed to create run: {}", e))?;
+    
+    // Poll for completion
+    let run_id = run.id;
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        
+        let run_status = client
+            .threads()
+            .runs(&thread_id)
+            .retrieve(&run_id)
+            .await
+            .map_err(|e| format!("Failed to retrieve run status: {}", e))?;
+        
+        match run_status.status {
+            RunStatus::Completed => break,
+            RunStatus::Failed => {
+                return Err(format!("Run failed: {:?}", run_status.last_error));
+            }
+            RunStatus::Cancelled => {
+                return Err("Run was cancelled".to_string());
+            }
+            RunStatus::Expired => {
+                return Err("Run expired".to_string());
+            }
+            _ => continue, // Still processing
+        }
+    }
+    
+    // Retrieve messages
+    let messages = client
+        .threads()
+        .messages(&thread_id)
+        .list()
+        .await
+        .map_err(|e| format!("Failed to retrieve messages: {}", e))?;
+    
+    // Extract the assistant's response
+    for message in messages.data {
+        if message.role == MessageRole::Assistant {
+            for content_item in &message.content {
+                if let MessageContent::Text(text_content) = content_item {
+                    return Ok(text_content.text.value.clone());
+                }
+            }
+        }
+    }
+    
+    Err("No response from assistant".to_string())
 }
 
 // Helper function to check if a file is a summary file by reading its frontmatter
@@ -187,23 +345,35 @@ fn cluster_files_by_type(files: Vec<FileInfo>) -> Result<Vec<Cluster>, String> {
 }
 
 #[tauri::command]
-fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, String> {
+async fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, String> {
     let mut cluster_summaries = Vec::new();
     let mut total_files = 0;
     let mut document_types = Vec::new();
     
+    // Generate summaries for each cluster
     for cluster in &clusters {
         total_files += cluster.files.len();
         document_types.push(cluster.doc_type.clone());
         
         let file_names: Vec<String> = cluster.files.iter().map(|f| f.name.clone()).collect();
         
-        let summary = format!(
-            "This cluster contains {} {} document(s).\n\nFiles included:\n{}",
-            cluster.files.len(),
-            cluster.doc_type,
-            file_names.iter().map(|n| format!("- {}", n)).collect::<Vec<_>>().join("\n")
-        );
+        // Read markdown contents for this cluster
+        let markdown_content = read_markdown_contents(&cluster.files)?;
+        
+        // Call OpenAI Assistant to generate summary
+        let summary = match call_openai_assistant(markdown_content).await {
+            Ok(s) => s,
+            Err(e) => {
+                // Fallback to simple summary if API call fails
+                eprintln!("Warning: Failed to generate AI summary for cluster {}: {}. Using fallback summary.", cluster.doc_type, e);
+                format!(
+                    "This cluster contains {} {} document(s).\n\nFiles included:\n{}",
+                    cluster.files.len(),
+                    cluster.doc_type,
+                    file_names.iter().map(|n| format!("- {}", n)).collect::<Vec<_>>().join("\n")
+                )
+            }
+        };
         
         cluster_summaries.push(ClusterSummary {
             doc_type: cluster.doc_type.clone(),
@@ -217,12 +387,28 @@ fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, String> {
         });
     }
     
-    let overview = format!(
-        "Master Summary\n\nTotal files processed: {}\nDocument types found: {}\n\nThis vault contains academic documents organized into {} categories.",
-        total_files,
-        document_types.join(", "),
-        cluster_summaries.len()
+    // Generate master summary by combining all cluster summaries
+    let master_content = format!(
+        "Cluster Summaries:\n\n{}",
+        cluster_summaries.iter()
+            .map(|cs| format!("## {}\n\n{}\n", cs.doc_type.to_uppercase(), cs.summary))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     );
+    
+    let overview = match call_openai_assistant(master_content).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Fallback to simple overview if API call fails
+            eprintln!("Warning: Failed to generate AI master summary: {}. Using fallback overview.", e);
+            format!(
+                "Master Summary\n\nTotal files processed: {}\nDocument types found: {}\n\nThis vault contains academic documents organized into {} categories.",
+                total_files,
+                document_types.join(", "),
+                cluster_summaries.len()
+            )
+        }
+    };
     
     Ok(MasterSummary {
         overview,

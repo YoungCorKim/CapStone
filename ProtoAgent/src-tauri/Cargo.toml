@@ -28,4 +28,8 @@ regex = "1"
 tokio = { version = "1", features = ["full"] }
 async-openai = { version = "0.31", features = ["assistant"] }
 toml = "0.8"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+rig-core = "0.31.0"
+dotenvy = "0.15.7"
 

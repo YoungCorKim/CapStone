@@ -2,14 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
-use async_openai::{
-    config::OpenAIConfig,
-    types::assistants::{
-        CreateMessageRequest, CreateRunRequest, CreateThreadRequest, MessageContent, MessageRole, RunStatus,
-    },
-    Client,
-};
-use std::env;
+
+use rig::providers::openai;
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -48,48 +44,34 @@ pub struct MasterSummary {
     pub document_types: Vec<String>,
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+//RIG agents call
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+async fn ask_agent(prompt: String) -> Result<String, String> {
+    //let client: ollama::Client = ollama::Client::new(Nothing).unwrap();
+    let client: openai::Client = openai::Client::new(std::env::var("OPENAI_API_KEY").unwrap()).map_err(|e| e.to_string())?;
+    
 
-// Helper function to read API key from config file
-fn get_openai_api_key() -> Result<String, String> {
-    // First try environment variable
-    if let Ok(key) = env::var("OPENAI_API_KEY") {
-        if !key.is_empty() && key != "YOUR_OPENAI_API_KEY_HERE" {
-            return Ok(key);
-        }
-    }
-    
-    // Then try config file (try multiple possible paths)
-    let possible_paths = vec![
-        "src-tauri/config.toml",
-        "config.toml",
-        "./config.toml",
-    ];
-    
-    for config_path_str in possible_paths {
-        let config_path = Path::new(config_path_str);
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(config_path) {
-                if let Ok(config) = toml::from_str::<toml::Value>(&content) {
-                    if let Some(openai) = config.get("openai") {
-                        if let Some(api_key) = openai.get("api_key") {
-                            if let Some(key_str) = api_key.as_str() {
-                                if !key_str.is_empty() && key_str != "YOUR_OPENAI_API_KEY_HERE" {
-                                    return Ok(key_str.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    Err("OpenAI API key not found. Please set OPENAI_API_KEY environment variable or configure it in src-tauri/config.toml".to_string())
+    let summary_agent = client
+        .agent(openai::GPT_4O_MINI)
+        .name("summary_agent")
+        .preamble("Your a summarizing agent, whose job is to take the content of one or more 
+            mardown files and produce a summary in the form of a markdown. Also make sure to add a note that at the top
+            marking that it has been summarized by you the summarizing agent.
+        ")
+        .build();
+
+    let agent = client
+        .agent(openai::GPT_4O_MINI)
+        .preamble("You are a helpful agent. When you need to summarize something, you MUST call the summary_agent tool with the exact text to summarize. Do NOT output tool definitions or schemas - execute the tool directly.")  
+        .tool(summary_agent)
+        .build();
+    agent
+        .prompt(&prompt)
+        .max_turns(3)
+        .await
+        .map_err(|e| e.to_string())
+
+
 }
 
 // Helper function to read and combine markdown file contents
@@ -109,99 +91,6 @@ fn read_markdown_contents(files: &[FileInfo]) -> Result<String, String> {
     }
     
     Ok(combined_content)
-}
-
-// Helper function to call OpenAI Assistant API
-async fn call_openai_assistant(content: String) -> Result<String, String> {
-    let api_key = get_openai_api_key()?;
-    let assistant_id = "asst_OqCSPNDY3tWbYOUiFhpwMeiZ";
-    
-    // Create OpenAI client with API key and required OpenAI-Beta header
-    let config = OpenAIConfig::new()
-        .with_api_key(api_key)
-        .with_header("OpenAI-Beta", "assistants=v2")
-        .map_err(|e| format!("Failed to set OpenAI-Beta header: {}", e))?;
-    
-    let client = Client::with_config(config);
-    
-    // Create a thread
-    let thread_request = CreateThreadRequest {
-        messages: Some(vec![CreateMessageRequest {
-            role: MessageRole::User,
-            content: content.into(),
-            ..Default::default()
-        }]),
-        ..Default::default()
-    };
-    
-    let thread = client
-        .threads()
-        .create(thread_request)
-        .await
-        .map_err(|e| format!("Failed to create thread: {}", e))?;
-    
-    let thread_id = thread.id;
-    
-    // Create a run
-    let run_request = CreateRunRequest {
-        assistant_id: assistant_id.to_string(),
-        ..Default::default()
-    };
-    
-    let run = client
-        .threads()
-        .runs(&thread_id)
-        .create(run_request)
-        .await
-        .map_err(|e| format!("Failed to create run: {}", e))?;
-    
-    // Poll for completion
-    let run_id = run.id;
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        
-        let run_status = client
-            .threads()
-            .runs(&thread_id)
-            .retrieve(&run_id)
-            .await
-            .map_err(|e| format!("Failed to retrieve run status: {}", e))?;
-        
-        match run_status.status {
-            RunStatus::Completed => break,
-            RunStatus::Failed => {
-                return Err(format!("Run failed: {:?}", run_status.last_error));
-            }
-            RunStatus::Cancelled => {
-                return Err("Run was cancelled".to_string());
-            }
-            RunStatus::Expired => {
-                return Err("Run expired".to_string());
-            }
-            _ => continue, // Still processing
-        }
-    }
-    
-    // Retrieve messages
-    let messages = client
-        .threads()
-        .messages(&thread_id)
-        .list()
-        .await
-        .map_err(|e| format!("Failed to retrieve messages: {}", e))?;
-    
-    // Extract the assistant's response
-    for message in messages.data {
-        if message.role == MessageRole::Assistant {
-            for content_item in &message.content {
-                if let MessageContent::Text(text_content) = content_item {
-                    return Ok(text_content.text.value.clone());
-                }
-            }
-        }
-    }
-    
-    Err("No response from assistant".to_string())
 }
 
 // Helper function to check if a file is a summary file by reading its frontmatter
@@ -361,7 +250,7 @@ async fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, Str
         let markdown_content = read_markdown_contents(&cluster.files)?;
         
         // Call OpenAI Assistant to generate summary
-        let summary = match call_openai_assistant(markdown_content).await {
+        let summary = match ask_agent("Summarize: ".to_owned() + &markdown_content).await {
             Ok(s) => s,
             Err(e) => {
                 // Fallback to simple summary if API call fails
@@ -396,7 +285,7 @@ async fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, Str
             .join("\n\n")
     );
     
-    let overview = match call_openai_assistant(master_content).await {
+    let overview = match ask_agent("Summarize: ".to_owned() + &master_content).await {
         Ok(s) => s,
         Err(e) => {
             // Fallback to simple overview if API call fails
@@ -467,11 +356,16 @@ fn save_summary_to_vault(vault_path: String, summaries: MasterSummary) -> Result
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tracing_subscriber::fmt()  
+    .with_max_level(tracing::Level::TRACE)  
+    .init();
+
+    dotenvy::dotenv().ok();
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             scan_markdown_files,
             cluster_files_by_type,
             generate_summaries,

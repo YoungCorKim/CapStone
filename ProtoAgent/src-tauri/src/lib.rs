@@ -11,7 +11,11 @@ use async_openai::{
 };
 use std::env;
 
-#[derive(Debug, Serialize, Deserialize)]
+mod locality_sensitive_hashing_deduplicate;
+mod metadata_parser;
+mod pairwise_deduplicate;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileInfo {
     pub name: String,
     pub path: String,
@@ -55,7 +59,7 @@ fn greet(name: &str) -> String {
 }
 
 // Helper function to read API key from config file
-fn get_openai_api_key() -> Result<String, String> {
+pub fn get_openai_api_key() -> Result<String, String> {
     // First try environment variable
     if let Ok(key) = env::var("OPENAI_API_KEY") {
         if !key.is_empty() && key != "YOUR_OPENAI_API_KEY_HERE" {
@@ -229,8 +233,8 @@ fn is_summary_file(file_path: &Path) -> bool {
     false
 }
 
-#[tauri::command]
-fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
+
+pub fn scan_markdown_files_impl(vault_path: String) -> Result<Vec<FileInfo>, String> {
     let path = Path::new(&vault_path);
     
     if !path.exists() {
@@ -240,7 +244,7 @@ fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
     if !path.is_dir() {
         return Err("Vault path is not a directory".to_string());
     }
-    
+
     let mut files = Vec::new();
     
     for entry in WalkDir::new(path).follow_links(true) {
@@ -248,7 +252,7 @@ fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
         
         if entry.file_type().is_file() {
             let file_path = entry.path();
-            
+            //println!("Path: {:?}", &file_path);
             if let Some(ext) = file_path.extension() {
                 if ext == "md" || ext == "markdown" {
                     // Skip files marked as summaries
@@ -289,6 +293,11 @@ fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
     }
     
     Ok(files)
+}
+
+#[tauri::command]
+fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
+    scan_markdown_files_impl(vault_path)
 }
 
 #[tauri::command]

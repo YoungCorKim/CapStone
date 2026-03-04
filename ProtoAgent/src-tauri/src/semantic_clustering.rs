@@ -95,14 +95,14 @@ pub fn semantic_clustering_from_file_embeddings<'a>(
         cluster_map = cluster_helper(semantic_locality_hashing, file_embeddings);
     }
 
-    link_grouped_file(&cluster_map,  file_embeddings);
+    /*link_grouped_file(&cluster_map,  file_embeddings);
 
     for (_id, file) in file_embeddings.iter_mut() {
         let content: String = file.get_content().to_string();
         let path: String = file.get_path().to_string();
         let fm = file.get_frontmatter().clone();
         save_file(&path, &content, &fm);
-    }
+    }*/
 
     cluster_map
 }
@@ -146,6 +146,7 @@ fn link_grouped_file(
         link_files(&mut file_1, &mut file_2);
 
         master_list.insert(id_1, file_1);
+
         master_list.insert(id_2, file_2);
     }
 }
@@ -154,9 +155,6 @@ fn link_helper(frontmatter: &mut HashMap<String, Value>, wiki_link: String) {
     if !frontmatter.contains_key("related") {
         frontmatter.insert("related".to_string(), Value::Sequence(vec![]));
     }
-    /*normalize_frontmatter_file_links(frontmatter);
-    println!("Before:");
-    println!("{:?}", frontmatter);*/
 
     let links = frontmatter.get_mut("related").unwrap();
 
@@ -168,14 +166,11 @@ fn link_helper(frontmatter: &mut HashMap<String, Value>, wiki_link: String) {
                 seq.push(link_value);
             }
         }
-    
         _ => {
             println!("Not a sequence");
+            normalize_frontmatter_file_links(frontmatter);
         }
     }
-    /*normalize_frontmatter_file_links(frontmatter);
-    println!("After:");
-    println!("{:?}\n---------------------------------------------", frontmatter);*/
     
 }
 

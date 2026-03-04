@@ -1,10 +1,12 @@
 use crate::FileInfo;
 use reqwest::Client;
+use rig::loaders::file;
 use serde::{Deserialize, Serialize};
 use crate::get_openai_api_key;
 use crate::scan_markdown_files_impl;
 use serde_yaml::Value;
 use std::collections::HashMap;
+use std::hash::Hash;
 use crate::metadata_parser::extract_frontmatter;
 use std::fs;
 use crate::pairwise_deduplicate::pairwise_deduplicate;
@@ -15,6 +17,10 @@ use crate::metadata_parser::convert_to_wiki_link;
 use crate::metadata_parser::wiki_link_common_path;
 use crate::semantic_clustering::semantic_clustering;
 use crate::semantic_clustering::link_files;
+use crate::get_file_duplications;
+use crate::save_file;
+use crate::get_semantic_file_cluster;
+use crate::delete_file;
 
 //////////////////////////////////////////////  Global Variables  ///////////////////////////////////////////
 
@@ -229,17 +235,6 @@ async fn generate_embedded_file(
 
             normalize_frontmatter_file_links(&mut frontmatter);
 
-            /*
-            if let Some(value) = frontmatter.get_mut("related") {
-                if let Value::String(s) = value {
-                    let links: Vec<String> = normalize_frontmatter_file_links(s);
-            
-                    *value = Value::Sequence(
-                        links.into_iter().map(Value::String).collect()
-                    );
-                }
-            }*/
-
             let mut embeddings = get_embedding_default(
                 client,
                 api_key,
@@ -364,13 +359,10 @@ pub fn group_embeddings(
     hash_tables
 }
 
-pub async fn deduplicate_files(
-    files: Vec<FileInfo>,
-    model: &str
-) -> Result<(HashMap<usize, FileEmbedding>, Vec<HashMap<i16, Vec<usize>>>), String> {
-
+pub async fn generate_embedded_files( files: &Vec<FileInfo>,
+                                model: &str) 
+-> Result<HashMap<usize, FileEmbedding>, String> {
     let mut file_embeddings: HashMap<usize, FileEmbedding> = HashMap::new();
-
     let api_key: String;
     let client = Client::new();
 
@@ -385,7 +377,7 @@ pub async fn deduplicate_files(
 
     let mut file_id: usize = 0;
 
-    for file in &files {
+    for file in files {
         match generate_embedded_file(file_id, &file, &api_key, &client, model).await {
             Ok(file_embedding) => {
                 file_embeddings.insert(file_id, file_embedding);
@@ -397,13 +389,22 @@ pub async fn deduplicate_files(
         }
     }
 
-    if let (Some(mut file1), Some(mut file2)) =
-    (file_embeddings.remove(&0usize), file_embeddings.remove(&1usize))
-    {
-        link_files(&mut file1, &mut file2);
+    Ok(file_embeddings)
+}
 
-        file_embeddings.insert(0usize, file1);
-        file_embeddings.insert(1usize, file2);
+pub async fn deduplicate_files(
+    files: Vec<FileInfo>,
+    model: &str
+) -> Result<(HashMap<usize, FileEmbedding>, Vec<HashMap<i16, Vec<usize>>>), String> {
+    let mut file_embeddings:HashMap<usize, FileEmbedding> = HashMap::new();
+
+    match generate_embedded_files(&files, model).await {
+        Ok(embeddings) => {
+            file_embeddings = embeddings;
+        },
+        Err(_) => {
+            return Err("Failed to generate embeddings".to_string());
+        }
     }
 
     let mut sematic_locality_hashing: Vec<HashMap<i16, Vec<usize>>> = Vec::new();
@@ -438,46 +439,116 @@ pub async fn deduplicate_files(
 mod tests {
     use super::*; 
 
+
+    use std::io::{self, Write};
+    fn prompt_delete() -> bool {
+        print!("Delete this file? (y/n): ");
+        io::stdout().flush().unwrap(); // ensure prompt prints
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => true,
+            _ => false,
+        }
+    }
+
     #[tokio::test]
     async fn test_deduplicate_files() {
-        deduplicate_directory(&r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string()).await;
+        let dir_path = r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string();
+    
+        let files_to_delete = get_file_duplications(dir_path.clone()).await;
+    
+        println!("File duplications detected: {}.\n", files_to_delete.len());
+    
+        for (i, file) in files_to_delete.iter().enumerate() {
+            let relative_path =
+                relative_path_from_dir(dir_path.clone(), file.get_path().to_string());
+    
+            let frontmatter = file.frontmatter.clone();
+            let content = file.content.clone();
+    
+            println!("=== Duplicate #{} ===", i + 1);
+            println!("Path: {:?}", relative_path);
+    
+            if frontmatter.is_empty() {
+                println!("Frontmatter: <none>\n");
+            } else {
+                println!("Frontmatter:\n{:?}\n", frontmatter);
+            }
+    
+            let preview_len: usize = 500;
+            let preview: String = content.chars().take(preview_len).collect();
+            if content.chars().count() > preview_len {
+                println!("Content (first {} chars):\n{}...\n", preview_len, preview);
+            } else {
+                println!("Content:\n{}\n", preview);
+            }
+
+            let result = prompt_delete();
+
+            if result {
+                match delete_file(file.get_path()) {
+                    Ok(_) => println!("File deleted sucessfully!\n\n"), 
+                    Err(_) => println!("Fail to delete file!\n\n"),
+                }
+            }
+        }
     }
 
 
     #[tokio::test]
     async fn semantic_clustering_test() {
-        semantic_clustering(&r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string()).await;
-    }
+        let dir_path = r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string();
+        let clusters: Result<Vec<(FileEmbedding, FileEmbedding)>, String> =
+            get_semantic_file_cluster(dir_path.clone())
+            .await;
     
+        match clusters {
+            Ok(pairs) => {
+                println!("Total semantic pairs detected: {}\n", pairs.len());
     
-    #[tokio::test]
-    async fn test_generate_embedding() {
-        let text = "This is a text to test embedding generating";
-
-        match get_openai_api_key() {
-            Ok(key) => {
-                let client = Client::new();
-                let e = get_embedding_default(&client, &key, text, "text-embedding-3-small").await;
-                println!("{:?}", e);
-            },
-            Err (_) => {
-                println!("Fail to get API key");
+                for (mut file1, mut file2) in pairs {
+                    println!("----------------------------------");
+                    println!("File A: {}", relative_path_from_dir(dir_path.clone(), file1.get_path().to_string().clone()).unwrap());
+                    println!("File B: {}", relative_path_from_dir(dir_path.clone(), file2.get_path().to_string().clone()).unwrap());
+    
+                    print!("Link these files? (y/n): ");
+                    io::stdout().flush().unwrap();
+    
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input).unwrap();
+    
+                    match input.trim().to_lowercase().as_str() {
+                        "y" | "yes" => {
+                            link_files(&mut file1, &mut file2);
+                    
+                            match save_file(file1.get_path(), &file1.content, &file1.frontmatter) {
+                                Ok(_) => println!("Saved {}", file1.get_path()),
+                                Err(e) => println!("Failed to save {}: {}", file1.get_path(), e),
+                            }
+                    
+                            match save_file(file2.get_path(), &file2.content, &file2.frontmatter) {
+                                Ok(_) => println!("Saved {}", file2.get_path()),
+                                Err(e) => println!("Failed to save {}: {}", file2.get_path(), e),
+                            }
+                    
+                            println!("Files linked.\n");
+                        }
+                    
+                        _ => {
+                            println!("Skipped.\n");
+                        }
+                    }
+                    println!("\n");
+                }
+            }
+    
+            Err(e) => {
+                panic!("Semantic clustering failed: {}", e);
             }
         }
     }
-
-    #[tokio::test]
-    async fn test_convert_to_wiki_link() {
-        let path1 = r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing\climate change 1.md".to_string();
-        let path2 = r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing\Subfolder 1\Generative AI.md".to_string();
-
-        println!("{}", wiki_link_common_path(&path1, &path2).unwrap());
-
-        println!("{}", convert_to_wiki_link(&wiki_link_common_path(&path1, &path2).unwrap()));
-    }
-
-    
-
-
 
 }

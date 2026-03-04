@@ -1,19 +1,19 @@
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
-use walkdir::WalkDir;
-use std::env;
 mod locality_sensitive_hashing_deduplicate;
 mod metadata_parser;
 mod pairwise_deduplicate;
 mod semantic_clustering;
 
-use rig::providers::openai;
+use rig::providers::azure::TEXT_EMBEDDING_3_LARGE;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+use walkdir::WalkDir;
+use std::env;
+use rig::{embeddings::embedding, providers::openai};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use serde_yaml::Value;
-use std::collections::{HashMap};
-
+use std::collections::{HashMap, HashSet};
 use async_openai::{
     config::OpenAIConfig,
     types::assistants::{
@@ -21,6 +21,12 @@ use async_openai::{
     },
     Client,
 };
+
+use crate::locality_sensitive_hashing_deduplicate::{FileEmbedding, deduplicate_directory, generate_embedded_files};
+use semantic_clustering::semantic_clustering_from_file_embeddings;
+use locality_sensitive_hashing_deduplicate::group_embeddings;
+
+const TEXT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileInfo {
@@ -332,6 +338,77 @@ fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
     scan_markdown_files_impl(&vault_path)
 }
 
+
+pub async fn get_semantic_file_cluster(
+    vault_path: String,
+) -> Result<Vec<(FileEmbedding, FileEmbedding)>, String> {
+    let files = scan_markdown_files(vault_path)
+        .map_err(|_| "Fail to scan markdown files".to_string())?;
+
+    let embeddings: HashMap<usize, FileEmbedding> = generate_embedded_files(&files, TEXT_EMBEDDING_MODEL)
+        .await
+        .map_err(|_| "Fail to load embeddings".to_string())?;
+
+    let semantic_file_grouping = group_embeddings(&embeddings);
+
+    let file_clusters = semantic_clustering_from_file_embeddings(
+        &mut embeddings.clone(),
+        &semantic_file_grouping,
+    );
+
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+
+    let mut pairs: Vec<(FileEmbedding, FileEmbedding)> = Vec::new();
+
+    for (&id1, cluster) in file_clusters.iter() {
+        for &id2 in cluster.iter() {
+            if id1 == id2 {
+                continue;
+            }
+
+            let key = if id1 < id2 { (id1, id2) } else { (id2, id1) };
+            if !seen.insert(key) {
+                continue;
+            }
+
+            let (a, b) = key;
+            let (Some(f1), Some(f2)) = (embeddings.get(&a), embeddings.get(&b)) else {
+                continue;
+            };
+
+            pairs.push((f1.clone(), f2.clone()));
+        }
+    }
+
+    Ok(pairs)
+}
+
+
+pub async fn get_file_duplications(vault_path: String) -> Vec<FileEmbedding> {
+    match deduplicate_directory(&vault_path).await {
+        Ok((file_embeddings, _semantic_hashing)) => {
+            let mut to_remove_files: Vec<FileEmbedding> = Vec::new();
+    
+            for (_, file) in file_embeddings {
+                if *file.get_duplicate() {
+                    to_remove_files.push(file);
+                }
+            }
+    
+            to_remove_files
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+pub fn delete_file(path: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to delete file {}: {}", path, e)),
+    }
+}
+
+
 pub fn save_file(
     path: &str,
     content: &str,
@@ -339,6 +416,9 @@ pub fn save_file(
 ) -> Result<(), std::io::Error> {
 
     let yaml = serde_yaml::to_string(frontmatter).unwrap();
+
+    //println!("{:?}", path);
+    //println!("{:?}\n\n", frontmatter);
 
     let file_data = format!(
         "---\n{}---\n\n{}",
@@ -538,6 +618,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             scan_markdown_files,
+            /*get_semantic_file_cluster,
+            get_file_duplications,
+            save_file,*/
             cluster_files_by_type,
             generate_summaries,
             save_summary_to_vault

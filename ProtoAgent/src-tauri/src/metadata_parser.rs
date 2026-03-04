@@ -53,13 +53,17 @@ pub fn wiki_link_common_path(from: &String, to: &String) -> Option<String> {
 pub fn extract_frontmatter(content: &str) -> FileContent {
     let trimmed = content.trim_start();
 
-    if trimmed.starts_with("---\n") {
-        if let Some(end) = trimmed[4..].find("\n---") {
+    //println!("---------------------------\n{:?}\n\n", content);
+    
+    if trimmed.starts_with("---") {
+        if let Some(end) = trimmed[4..].find("---") {
             let fm_start = 4;
             let fm_end = fm_start + end;
 
             let frontmatter = trimmed[fm_start..fm_end].to_string();
-            let body = trimmed[fm_end + 5..].trim_start().to_string();
+            let body = trimmed[fm_end + 3..].trim_start().to_string();
+
+            //println!("Found frontmatter {:?}------------------------------------------\n\n", frontmatter);
 
             return FileContent {
                 content: body,
@@ -108,8 +112,16 @@ pub fn normalize_frontmatter_file_links(frontmatter: &mut HashMap<String, Value>
             *value = Value::Sequence(
                 links.into_iter().map(Value::String).collect()
             );
+
+            return;
         }
-    }
+    } 
+    frontmatter.insert(
+        "related".to_string(),
+        Value::Sequence(vec![
+            Value::String("Example".to_string())
+        ])
+    );
 }
 
  

@@ -34,3 +34,8 @@ rand = "0.8"
 hashbrown = "0.12" 
 ndarray = "0.15" 
 chrono = "0.4"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+rig-core = "0.31.0"
+dotenvy = "0.15.7"
+

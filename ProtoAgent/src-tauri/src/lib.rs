@@ -2,6 +2,18 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
+use std::env;
+mod locality_sensitive_hashing_deduplicate;
+mod metadata_parser;
+mod pairwise_deduplicate;
+mod semantic_clustering;
+
+use rig::providers::openai;
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
+use serde_yaml::Value;
+use std::collections::{HashMap};
+
 use async_openai::{
     config::OpenAIConfig,
     types::assistants::{
@@ -9,11 +21,6 @@ use async_openai::{
     },
     Client,
 };
-use std::env;
-
-mod locality_sensitive_hashing_deduplicate;
-mod metadata_parser;
-mod pairwise_deduplicate;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileInfo {
@@ -52,12 +59,6 @@ pub struct MasterSummary {
     pub document_types: Vec<String>,
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 // Helper function to read API key from config file
 pub fn get_openai_api_key() -> Result<String, String> {
     // First try environment variable
@@ -94,6 +95,35 @@ pub fn get_openai_api_key() -> Result<String, String> {
     }
     
     Err("OpenAI API key not found. Please set OPENAI_API_KEY environment variable or configure it in src-tauri/config.toml".to_string())
+}
+//RIG agents call
+#[tauri::command]
+async fn ask_agent(prompt: String) -> Result<String, String> {
+    //let client: ollama::Client = ollama::Client::new(Nothing).unwrap();
+    let client: openai::Client = openai::Client::new(std::env::var("OPENAI_API_KEY").unwrap()).map_err(|e| e.to_string())?;
+    
+
+    let summary_agent = client
+        .agent(openai::GPT_4O_MINI)
+        .name("summary_agent")
+        .preamble("Your a summarizing agent, whose job is to take the content of one or more 
+            mardown files and produce a summary in the form of a markdown. Also make sure to add a note that at the top
+            marking that it has been summarized by you the summarizing agent.
+        ")
+        .build();
+
+    let agent = client
+        .agent(openai::GPT_4O_MINI)
+        .preamble("You are a helpful agent. When you need to summarize something, you MUST call the summary_agent tool with the exact text to summarize. Do NOT output tool definitions or schemas - execute the tool directly.")  
+        .tool(summary_agent)
+        .build();
+    agent
+        .prompt(&prompt)
+        .max_turns(3)
+        .await
+        .map_err(|e| e.to_string())
+
+
 }
 
 // Helper function to read and combine markdown file contents
@@ -234,7 +264,7 @@ fn is_summary_file(file_path: &Path) -> bool {
 }
 
 
-pub fn scan_markdown_files_impl(vault_path: String) -> Result<Vec<FileInfo>, String> {
+fn scan_markdown_files_impl(vault_path: &String) -> Result<Vec<FileInfo>, String> {
     let path = Path::new(&vault_path);
     
     if !path.exists() {
@@ -245,6 +275,7 @@ pub fn scan_markdown_files_impl(vault_path: String) -> Result<Vec<FileInfo>, Str
         return Err("Vault path is not a directory".to_string());
     }
 
+    
     let mut files = Vec::new();
     
     for entry in WalkDir::new(path).follow_links(true) {
@@ -253,6 +284,7 @@ pub fn scan_markdown_files_impl(vault_path: String) -> Result<Vec<FileInfo>, Str
         if entry.file_type().is_file() {
             let file_path = entry.path();
             //println!("Path: {:?}", &file_path);
+            
             if let Some(ext) = file_path.extension() {
                 if ext == "md" || ext == "markdown" {
                     // Skip files marked as summaries
@@ -297,7 +329,26 @@ pub fn scan_markdown_files_impl(vault_path: String) -> Result<Vec<FileInfo>, Str
 
 #[tauri::command]
 fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
-    scan_markdown_files_impl(vault_path)
+    scan_markdown_files_impl(&vault_path)
+}
+
+pub fn save_file(
+    path: &str,
+    content: &str,
+    frontmatter: &HashMap<String, Value>,
+) -> Result<(), std::io::Error> {
+
+    let yaml = serde_yaml::to_string(frontmatter).unwrap();
+
+    let file_data = format!(
+        "---\n{}---\n\n{}",
+        yaml,
+        content
+    );
+
+    fs::write(path, file_data)?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -370,7 +421,7 @@ async fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, Str
         let markdown_content = read_markdown_contents(&cluster.files)?;
         
         // Call OpenAI Assistant to generate summary
-        let summary = match call_openai_assistant(markdown_content).await {
+        let summary = match ask_agent("Summarize: ".to_owned() + &markdown_content).await {
             Ok(s) => s,
             Err(e) => {
                 // Fallback to simple summary if API call fails
@@ -404,8 +455,8 @@ async fn generate_summaries(clusters: Vec<Cluster>) -> Result<MasterSummary, Str
             .collect::<Vec<_>>()
             .join("\n\n")
     );
-    
-    let overview = match call_openai_assistant(master_content).await {
+
+    let overview = match ask_agent("Summarize: ".to_owned() + &master_content).await {
         Ok(s) => s,
         Err(e) => {
             // Fallback to simple overview if API call fails
@@ -476,11 +527,16 @@ fn save_summary_to_vault(vault_path: String, summaries: MasterSummary) -> Result
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tracing_subscriber::fmt()  
+    .with_max_level(tracing::Level::TRACE)  
+    .init();
+
+    dotenvy::dotenv().ok();
+    
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             scan_markdown_files,
             cluster_files_by_type,
             generate_summaries,

@@ -13,6 +13,8 @@ use crate::metadata_parser::normalize_frontmatter_file_links;
 use crate::metadata_parser::relative_path_from_dir;
 use crate::metadata_parser::convert_to_wiki_link;
 use crate::metadata_parser::wiki_link_common_path;
+use crate::semantic_clustering::semantic_clustering;
+use crate::semantic_clustering::link_files;
 
 //////////////////////////////////////////////  Global Variables  ///////////////////////////////////////////
 
@@ -144,19 +146,20 @@ struct EmbeddingResponse {
     data: Vec<EmbeddingData>,
 }
 
-pub async fn deduplicate_directory(directory_path: String) -> Option<Vec<FileInfo>> {
+pub async fn deduplicate_directory(
+    directory_path: &String
+) -> Result<(HashMap<usize, FileEmbedding>, Vec<HashMap<i16, Vec<usize>>>), String> {
+
     let files = scan_markdown_files_impl(directory_path);
 
     match files {
         Ok(files) => {
-            match deduplicate_files_default(files).await
-            {
-                Ok(deduped) => Some(deduped),
-                Err (_) => None,
-            }
+            deduplicate_files_default(files).await
         },
 
-        Err(_) => { None },
+        Err(_) => {
+            Err("Fail to scan files".to_string())
+        },
     }
 }
 
@@ -195,7 +198,9 @@ async fn get_embedding_default( client: &Client,
     return get_embedding(client, api_key, text, model, "https://api.openai.com/v1/embeddings").await;
 }
 
-pub async fn deduplicate_files_default(files: Vec<FileInfo>) -> Result<Vec<FileInfo>, String> {
+pub async fn deduplicate_files_default(
+    files: Vec<FileInfo>,
+) -> Result<(HashMap<usize, FileEmbedding>, Vec<HashMap<i16, Vec<usize>>>), String> {
     deduplicate_files(files, "text-embedding-3-small").await
 }
 
@@ -222,6 +227,9 @@ async fn generate_embedded_file(
                 }
             }
 
+            normalize_frontmatter_file_links(&mut frontmatter);
+
+            /*
             if let Some(value) = frontmatter.get_mut("related") {
                 if let Value::String(s) = value {
                     let links: Vec<String> = normalize_frontmatter_file_links(s);
@@ -230,7 +238,7 @@ async fn generate_embedded_file(
                         links.into_iter().map(Value::String).collect()
                     );
                 }
-            }
+            }*/
 
             let mut embeddings = get_embedding_default(
                 client,
@@ -283,36 +291,42 @@ fn generate_plane(dimension: &usize) -> Vec<f32> {
     plane
 }
 
-fn generate_hash_table(file_embeddings: &Vec<FileEmbedding>) -> HashMap<i16, Vec<usize>> {
+fn generate_hash_table(
+    file_embeddings: &HashMap<usize, FileEmbedding>
+) -> HashMap<i16, Vec<usize>> {
     if file_embeddings.is_empty() {
         return HashMap::new();
     }
 
-    let mut hash_buckets:HashMap<i16, Vec<usize>> = HashMap::new();
+    let mut hash_buckets: HashMap<i16, Vec<usize>> = HashMap::new();
 
-    let mut hyperplanes:Vec<Vec<f32>> = Vec::new();
+    // Get dimension from any embedding
+    let dimension = file_embeddings
+        .values()
+        .next()
+        .expect("file_embeddings is not empty")
+        .get_embeddings()
+        .len();
 
-    let dimension = &file_embeddings[0].get_embeddings().len();
+    let mut hyperplanes: Vec<Vec<f32>> = Vec::new();
 
     for _ in 0..HYPERPLANES {
-        let plane:Vec<f32> = generate_plane(dimension);
-        
+        let plane: Vec<f32> = generate_plane(&dimension);
         hyperplanes.push(plane);
     }
-    
-    for file_embedding in file_embeddings {
+
+    for (id, file_embedding) in file_embeddings.iter() {
         let embeddings = file_embedding.get_embeddings();
 
         let mut hash: i16 = 0;
 
         for (index, plane) in hyperplanes.iter().enumerate() {
-            
-            if is_in_plane(&plane, &embeddings) {
+            if is_in_plane(plane, &embeddings) {
                 hash += 2_i16.pow(index as u32);
             }
         }
 
-        hash_buckets.entry(hash).or_insert_with(Vec::new).push(file_embedding.id);
+        hash_buckets.entry(hash).or_insert_with(Vec::new).push(*id);
     }
 
     hash_buckets
@@ -337,30 +351,34 @@ fn dot_product(plane_embedding: &Vec<f32>, text_embedding: &Vec<f32>) -> f32 {
 }
 
 
-fn group_embeddings(embeddings: &Vec<FileEmbedding>) -> Vec<HashMap<i16, Vec<usize>>>{
+pub fn group_embeddings(
+    embeddings: &HashMap<usize, FileEmbedding>
+) -> Vec<HashMap<i16, Vec<usize>>> {
     let mut hash_tables: Vec<HashMap<i16, Vec<usize>>> = Vec::new();
 
     for _ in 0..NUMBER_OF_HASHTABLES {
         let hash_table = generate_hash_table(embeddings);
-
         hash_tables.push(hash_table);
     }
 
     hash_tables
 }
 
-pub async fn deduplicate_files(files: Vec<FileInfo>, model: &str) -> Result<Vec<FileInfo>, String> {
-    let mut file_embeddings:Vec<FileEmbedding> = Vec::new();
+pub async fn deduplicate_files(
+    files: Vec<FileInfo>,
+    model: &str
+) -> Result<(HashMap<usize, FileEmbedding>, Vec<HashMap<i16, Vec<usize>>>), String> {
+
+    let mut file_embeddings: HashMap<usize, FileEmbedding> = HashMap::new();
 
     let api_key: String;
-
     let client = Client::new();
 
     match get_openai_api_key() {
         Ok(key) => {
             api_key = key;
         },
-        Err (_) => {
+        Err(_) => {
             return Err("Fail to get API key".to_string());
         }
     }
@@ -369,8 +387,8 @@ pub async fn deduplicate_files(files: Vec<FileInfo>, model: &str) -> Result<Vec<
 
     for file in &files {
         match generate_embedded_file(file_id, &file, &api_key, &client, model).await {
-            Ok(file) => {
-                file_embeddings.push(file);
+            Ok(file_embedding) => {
+                file_embeddings.insert(file_id, file_embedding);
                 file_id += 1;
             }
             Err(_) => {
@@ -379,23 +397,41 @@ pub async fn deduplicate_files(files: Vec<FileInfo>, model: &str) -> Result<Vec<
         }
     }
 
-    if file_embeddings.len() > 3000 {
-        let sematic_locality_hashing = group_embeddings(&file_embeddings);
+    if let (Some(mut file1), Some(mut file2)) =
+    (file_embeddings.remove(&0usize), file_embeddings.remove(&1usize))
+    {
+        link_files(&mut file1, &mut file2);
 
-        for table in sematic_locality_hashing {
-            for(_, grouped_files) in table {
-                pairwise_deduplicate(&mut file_embeddings, &grouped_files);
+        file_embeddings.insert(0usize, file1);
+        file_embeddings.insert(1usize, file2);
+    }
+
+    let mut sematic_locality_hashing: Vec<HashMap<i16, Vec<usize>>> = Vec::new();
+
+    if file_embeddings.len() > 3000 {
+
+        sematic_locality_hashing = group_embeddings(&file_embeddings);
+
+        for table in &sematic_locality_hashing {
+            for (_, grouped_files) in table {
+                pairwise_deduplicate(&mut file_embeddings, grouped_files);
             }
         }
-    } else { 
-        let length = file_embeddings.len();
 
-        let v: Vec<usize> = (0..length).collect();
+    } else {
+
+        let v: Vec<usize> = file_embeddings.keys().cloned().collect();
 
         pairwise_deduplicate(&mut file_embeddings, &v);
     }
 
-    Ok(files)
+    for (key, value) in &file_embeddings {
+        if *value.get_duplicate() {
+            println!("{:?}", value.get_path());
+        }
+    }
+
+    Ok((file_embeddings, sematic_locality_hashing))
 }
 
 #[cfg(test)]
@@ -404,9 +440,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_deduplicate_files() {
-        deduplicate_directory(r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string()).await;
+        deduplicate_directory(&r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string()).await;
     }
 
+
+    #[tokio::test]
+    async fn semantic_clustering_test() {
+        semantic_clustering(&r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing".to_string()).await;
+    }
+    
+    
     #[tokio::test]
     async fn test_generate_embedding() {
         let text = "This is a text to test embedding generating";
@@ -423,14 +466,6 @@ mod tests {
         }
     }
 
-    fn test_normalize_link_helper(str: &str) {
-        println!("Before:");
-        println!("{}", str);
-        println!("After:");
-        println!("{:?}",normalize_frontmatter_link(&str.to_string()));
-        println!();
-    }
-
     #[tokio::test]
     async fn test_convert_to_wiki_link() {
         let path1 = r"C:\Users\chuon\OneDrive\Desktop\Git Projects\Markdown files testing\Agentic Idea Testing\climate change 1.md".to_string();
@@ -441,19 +476,8 @@ mod tests {
         println!("{}", convert_to_wiki_link(&wiki_link_common_path(&path1, &path2).unwrap()));
     }
 
-    #[tokio::test]
-    async fn test_normalize_link() {
-        test_normalize_link_helper("This is link [[link]] to extract");
-        test_normalize_link_helper("This is link [[link to extract");
-        test_normalize_link_helper("This is link link]] to extract");
-        test_normalize_link_helper("[[link]] to extract");
-        test_normalize_link_helper("This is link [[link]]");
-        test_normalize_link_helper("[[link]]");
-        test_normalize_link_helper("[link]");
-        test_normalize_link_helper("[[link");
-        test_normalize_link_helper("link]]");
-        test_normalize_link_helper("Multiple links [[link]] [[link]]");
-    }
+    
+
 
 
 }

@@ -7,7 +7,7 @@ use chrono::Utc;
 static THRESHOLD: f32 = 0.85;
 
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() || b.is_empty() {
         return 0.0;
     }
@@ -91,74 +91,90 @@ pub fn merge_frontmatter(fm_1: &mut HashMap<String, serde_yaml::Value>, fm_2: &H
     fm_1.insert("updated".to_string(), Value::String(today));
 }
 
-pub fn pairwise_deduplicate(master_file_list: &mut Vec<FileEmbedding>, to_deduplicate_list: &Vec<usize>) -> Result<bool, String> {
-    let empty_string = "".to_string();
-
+pub fn pairwise_deduplicate(
+    master_file_list: &mut HashMap<usize, FileEmbedding>,
+    to_deduplicate_list: &Vec<usize>,
+) -> Result<bool, String> {
     let mut duplicate_tracker: HashMap<usize, usize> = HashMap::new();
 
     for i in 0..to_deduplicate_list.len() {
-
         let id_1 = to_deduplicate_list[i];
 
-        let file_1 = &master_file_list[id_1];
+        let Some(file_1) = master_file_list.get(&id_1) else {
+            continue;
+        };
 
-        if *file_1.get_duplicate() { continue; }
+        if *file_1.get_duplicate() {
+            continue;
+        }
 
-        let embedding_file_1 = &file_1.get_embeddings();
+        let embedding_file_1 = file_1.get_embeddings();
 
         for j in (i + 1)..to_deduplicate_list.len() {
-
             let id_2 = to_deduplicate_list[j];
 
-            let file_2 = &master_file_list[id_2];
+            let Some(file_2) = master_file_list.get(&id_2) else {
+                continue;
+            };
 
-            if *file_2.get_duplicate() { continue; }
+            if *file_2.get_duplicate() {
+                continue;
+            }
 
-            let embedding_file_2 = &file_2.get_embeddings();
-            
-            let similarity = cosine_similarity( embedding_file_1, embedding_file_2);
+            let embedding_file_2 = file_2.get_embeddings();
+            let similarity = cosine_similarity(embedding_file_1, embedding_file_2);
 
             if similarity >= THRESHOLD {
-                let id_1 = file_1.get_id().clone();
-
-                let id_2 = file_2.get_id().clone();
-
                 duplicate_tracker.insert(id_2, id_1);
             }
         }
-
-
     }
 
     for (remove_id, keep_id) in duplicate_tracker {
-
         if remove_id == keep_id {
             continue;
         }
 
-        if *master_file_list[remove_id].get_duplicate() {
-            continue;
-        } else if *master_file_list[keep_id].get_duplicate() {
-            master_file_list[remove_id].set_duplicate();
+        if !master_file_list.contains_key(&remove_id) || !master_file_list.contains_key(&keep_id) {
             continue;
         }
 
+        let remove_is_dup = master_file_list
+            .get(&remove_id)
+            .map(|f| *f.get_duplicate())
+            .unwrap_or(true);
 
-        let (keep_file, remove_file) = if keep_id < remove_id {
-            let (left, right) = master_file_list.split_at_mut(remove_id);
-        (&mut left[keep_id], &mut right[0])
-        } else {
-            let (left, right) = master_file_list.split_at_mut(keep_id);
-            (&mut right[0], &mut left[remove_id])
+        if remove_is_dup {
+            continue;
+        }
+
+        let keep_is_dup = master_file_list
+            .get(&keep_id)
+            .map(|f| *f.get_duplicate())
+            .unwrap_or(true);
+
+        if keep_is_dup {
+            if let Some(remove_file) = master_file_list.get_mut(&remove_id) {
+                remove_file.set_duplicate();
+            }
+            continue;
+        }
+
+        let mut keep_file = match master_file_list.remove(&keep_id) {
+            Some(f) => f,
+            None => continue,
         };
 
-        let keep_file_frontmatter = keep_file.get_frontmatter();
+        if let Some(remove_file) = master_file_list.get_mut(&remove_id) {
+            let keep_frontmatter = keep_file.get_frontmatter();
+            let remove_frontmatter = remove_file.get_frontmatter();
 
-        let delete_file_frontmatter = remove_file.get_frontmatter();
+            merge_frontmatter(keep_frontmatter, remove_frontmatter);
 
-        merge_frontmatter(keep_file_frontmatter, delete_file_frontmatter);
+            remove_file.set_duplicate();
+        }
 
-        remove_file.set_duplicate();
+        master_file_list.insert(keep_id, keep_file);
     }
 
     Ok(true)

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::path::Component;
-
+use serde_yaml::Value;
+use std::collections::HashMap;
 pub struct FileContent {
     pub content: String,
     pub frontmatter: Option<String>,
@@ -13,16 +14,13 @@ pub fn convert_to_wiki_link(wiki_path: &String) -> String {
                         .to_string_lossy()
                         .to_string();
 
-    //let file_name_without_extension = path.to_string();    
-
-    println!("{}", file_name_without_extension);
-
     format!(
-        "[[{}]]({})",
+        "[[{}]](<{}>)",
         file_name_without_extension,
         wiki_path.clone()
     )
 }
+
 
 pub fn wiki_link_common_path(from: &String, to: &String) -> Option<String> {
     let from_path = Path::new(&from);
@@ -97,23 +95,23 @@ pub fn relative_path_from_dir(
 
 
 
-pub fn normalize_frontmatter_file_links(input: &String) -> Vec<String> {
-    let list: Vec<String> = input
-    .split(",")
-    .map(|s| {
-        s.trim()
-        .to_string()
-    })
-    .filter(|s| !s.is_empty())
-    .collect();
+pub fn normalize_frontmatter_file_links(frontmatter: &mut HashMap<String, Value>) {
+    if let Some(value) = frontmatter.get_mut("related") {
+        if let Value::String(s) = value {
 
-    list
+            let links: Vec<String> = s
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            *value = Value::Sequence(
+                links.into_iter().map(Value::String).collect()
+            );
+        }
+    }
 }
-pub fn extract_relative_file_path(path_1: &String, path_2: &String) -> String {
 
-
-    String::from("")
-}
  
 pub fn normalize_frontmatter_link(frontmatter: &String) -> String {
     let length = frontmatter.len();

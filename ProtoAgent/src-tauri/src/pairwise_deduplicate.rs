@@ -1,10 +1,50 @@
-use crate::{MasterSummary, locality_sensitive_hashing_deduplicate::FileEmbedding};
+use crate::locality_sensitive_hashing_deduplicate::FileEmbedding;
 use serde_yaml::Value;
 use std::collections::HashMap;
 use chrono::Utc;
 
 
 static THRESHOLD: f32 = 0.85;
+
+/// Identify duplicate pairs without modifying. Returns (path_a, path_b) for each pair.
+pub fn identify_duplicate_pairs(
+    file_embeddings: &HashMap<usize, FileEmbedding>,
+    to_compare: &[usize],
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for i in 0..to_compare.len() {
+        let id_1 = to_compare[i];
+        let Some(file_1) = file_embeddings.get(&id_1) else {
+            continue;
+        };
+        let embedding_1 = file_1.get_embeddings();
+
+        for j in (i + 1)..to_compare.len() {
+            let id_2 = to_compare[j];
+            let Some(file_2) = file_embeddings.get(&id_2) else {
+                continue;
+            };
+            let embedding_2 = file_2.get_embeddings();
+            let similarity = cosine_similarity(embedding_1, embedding_2);
+
+            if similarity >= THRESHOLD {
+                let path_1 = file_1.get_path().to_string();
+                let path_2 = file_2.get_path().to_string();
+                let key = if path_1 < path_2 {
+                    (path_1.clone(), path_2.clone())
+                } else {
+                    (path_2.clone(), path_1.clone())
+                };
+                if seen.insert(key.clone()) {
+                    pairs.push(key);
+                }
+            }
+        }
+    }
+    pairs
+}
 
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

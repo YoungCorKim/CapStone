@@ -1,16 +1,15 @@
 import { open } from "@tauri-apps/plugin-dialog";
 
-export default function FolderSelector({ onFolderSelected, vaultPath, fileCount }) {
+export default function FolderSelector({ onFolderSelected, vaultPath, fileCount, compact }) {
   const handleSelectFolder = async () => {
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Select Obsidian Vault Folder",
+        title: "Select Folder",
       });
-      
+
       if (selected) {
-        // Handle both string (single path) and array (multiple paths) cases
         const path = Array.isArray(selected) ? selected[0] : selected;
         onFolderSelected(path);
       }
@@ -19,6 +18,21 @@ export default function FolderSelector({ onFolderSelected, vaultPath, fileCount 
       alert(`Error selecting folder: ${error}`);
     }
   };
+
+  if (compact) {
+    return (
+      <div className="folder-selector compact">
+        <button onClick={handleSelectFolder} className="select-folder-btn compact">
+          {vaultPath ? "Change Folder" : "Open Folder"}
+        </button>
+        {vaultPath && (
+          <p className="vault-path compact" title={vaultPath}>
+            {vaultPath.split(/[/\\]/).pop() || vaultPath}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="folder-selector">

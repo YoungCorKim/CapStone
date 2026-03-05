@@ -1,7 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use rig::loaders::file;
-use rig::providers::gemini::completion::gemini_api_types::Content;
 use serde_yaml::Value;
 use crate::metadata_parser::wiki_link_common_path;
 use crate::metadata_parser::normalize_frontmatter_file_links;

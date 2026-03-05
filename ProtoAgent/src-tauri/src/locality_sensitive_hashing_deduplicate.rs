@@ -1,6 +1,5 @@
 use crate::FileInfo;
 use reqwest::Client;
-use rig::loaders::file;
 use serde::{Deserialize, Serialize};
 use crate::get_openai_api_key;
 use crate::scan_markdown_files_impl;

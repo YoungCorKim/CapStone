@@ -2,9 +2,23 @@ use std::path::{Path, PathBuf};
 use std::path::Component;
 use serde_yaml::Value;
 use std::collections::HashMap;
+use std::fs;
+use regex::Regex;
+use crate::FileInfo;
+//use locality_sensitive_hashing_deduplicate::get_embedding;
+use crate::locality_sensitive_hashing_deduplicate::FileEmbedding;
+use crate::scan_markdown_files_impl;
+
 pub struct FileContent {
     pub content: String,
     pub frontmatter: Option<String>,
+}
+
+
+pub fn same_file(p1: &str, p2: &str) -> std::io::Result<bool> {
+    let c1 = fs::canonicalize(p1)?;
+    let c2 = fs::canonicalize(p2)?;
+    Ok(c1 == c2)
 }
 
 pub fn convert_to_wiki_link(wiki_path: &String) -> String {
@@ -21,6 +35,21 @@ pub fn convert_to_wiki_link(wiki_path: &String) -> String {
     )
 }
 
+
+fn extract_wikilinks(content: &str) -> Vec<String> {
+    let re = Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+
+    re.captures_iter(content)
+        .map(|cap| {
+            cap[1]
+                .split('|')
+                .next()
+                .unwrap()
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
 
 pub fn wiki_link_common_path(from: &String, to: &String) -> Option<String> {
     let from_path = Path::new(&from);
@@ -48,6 +77,14 @@ pub fn wiki_link_common_path(from: &String, to: &String) -> Option<String> {
     }
 
     Some(result)
+}
+
+pub fn get_vault_path(file_path: &Path, vault_root: &Path) -> Option<PathBuf> {
+    if file_path.starts_with(vault_root) {
+        Some(vault_root.to_path_buf())
+    } else {
+        None
+    }
 }
 
 pub fn extract_frontmatter(content: &str) -> FileContent {

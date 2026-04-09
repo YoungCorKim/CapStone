@@ -4,9 +4,11 @@ mod metadata_parser;
 mod pairwise_deduplicate;
 mod rag_index;
 mod semantic_clustering;
-
+mod semantic_search;
+use rig::providers::azure::TEXT_EMBEDDING_3_LARGE;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use crate::enrich::EnrichedFile;
 use std::path::Path;
 use std::sync::Mutex;
 use walkdir::WalkDir;
@@ -14,6 +16,9 @@ use std::env;
 use rig::{client::CompletionClient, client::EmbeddingsClient, completion::Prompt, providers::openai};
 use rig::vector_store::in_memory_store::InMemoryVectorStore;
 use serde_yaml::Value;
+use walkdir::DirEntry as WalkDirEntry;
+mod test;
+mod enrich;
 use std::collections::{HashMap, HashSet};
 
 use crate::locality_sensitive_hashing_deduplicate::{FileEmbedding, deduplicate_directory, generate_embedded_files};
@@ -39,13 +44,14 @@ pub struct FilePair {
     pub name_b: String,
 }
 
+/// Serializable tree node for `list_directory` (not `walkdir::DirEntry`).
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DirEntry {
+pub struct VaultDirEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<DirEntry>>,
+    pub children: Option<Vec<VaultDirEntry>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,6 +221,8 @@ async fn ask_agent(
     ask_agent_impl(Some(&*state), app, prompt, vault_path).await
 }
 
+
+
 // Helper function to read and combine markdown file contents
 fn read_markdown_contents(files: &[FileInfo]) -> Result<String, String> {
     let mut combined_content = String::new();
@@ -260,6 +268,55 @@ fn is_summary_file(file_path: &Path) -> bool {
 }
 
 
+fn build_file_info(entry: &WalkDirEntry) -> Result<Option<FileInfo>, String> {
+    if entry.file_type().is_file() {
+        let file_path = entry.path();
+
+        if let Some(ext) = file_path.extension() {
+            if ext == "md" || ext == "markdown" {
+
+                // Skip summary files
+                if is_summary_file(file_path) {
+                    return Ok(None);
+                }
+
+                let metadata = entry
+                    .metadata()
+                    .map_err(|e| format!("Error reading file metadata: {}", e))?;
+
+                let modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| {
+                        time.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs().to_string())
+                    });
+
+                let name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let path_str = file_path
+                    .to_string_lossy()
+                    .to_string();
+
+                return Ok(Some(FileInfo {
+                    name,
+                    path: path_str,
+                    size: metadata.len(),
+                    modified,
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+
 fn scan_markdown_files_impl(vault_path: &String) -> Result<Vec<FileInfo>, String> {
     let path = Path::new(&vault_path);
     
@@ -271,65 +328,26 @@ fn scan_markdown_files_impl(vault_path: &String) -> Result<Vec<FileInfo>, String
         return Err("Vault path is not a directory".to_string());
     }
 
-    
     let mut files = Vec::new();
     
     for entry in WalkDir::new(path).follow_links(true) {
         let entry = entry.map_err(|e| format!("Error reading directory: {}", e))?;
         
-        if entry.file_type().is_file() {
-            let file_path = entry.path();
-            //println!("Path: {:?}", &file_path);
-            
-            if let Some(ext) = file_path.extension() {
-                if ext == "md" || ext == "markdown" {
-                    // Skip files marked as summaries
-                    if is_summary_file(file_path) {
-                        continue;
-                    }
-                    
-                    let metadata = entry.metadata().map_err(|e| format!("Error reading file metadata: {}", e))?;
-                    
-                    let modified = metadata
-                        .modified()
-                        .ok()
-                        .and_then(|time| {
-                            time.duration_since(std::time::UNIX_EPOCH)
-                                .ok()
-                                .map(|d| d.as_secs().to_string())
-                        });
-                    
-                    let name = file_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    
-                    let path_str = file_path
-                        .to_string_lossy()
-                        .to_string();
-                    
-                    files.push(FileInfo {
-                        name,
-                        path: path_str,
-                        size: metadata.len(),
-                        modified,
-                    });
-                }
-            }
+        if let Some(file_info) = build_file_info(&entry)? {
+            files.push(file_info);
         }
     }
     
     Ok(files)
 }
 
-fn list_directory_impl(path: &Path) -> Result<Vec<DirEntry>, String> {
+fn list_directory_impl(path: &Path) -> Result<Vec<VaultDirEntry>, String> {
     let mut entries = Vec::new();
 
     let read_dir = fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
-    let mut dirs: Vec<DirEntry> = Vec::new();
-    let mut files: Vec<DirEntry> = Vec::new();
+    let mut dirs: Vec<VaultDirEntry> = Vec::new();
+    let mut files: Vec<VaultDirEntry> = Vec::new();
 
     for entry in read_dir {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
@@ -354,7 +372,7 @@ fn list_directory_impl(path: &Path) -> Result<Vec<DirEntry>, String> {
                 Ok(_) => None,
                 Err(_) => None,
             };
-            dirs.push(DirEntry {
+            dirs.push(VaultDirEntry {
                 name,
                 path: path_str,
                 is_dir: true,
@@ -364,7 +382,7 @@ fn list_directory_impl(path: &Path) -> Result<Vec<DirEntry>, String> {
             if let Some(ext) = entry_path.extension() {
                 let ext = ext.to_string_lossy().to_lowercase();
                 if ext == "md" || ext == "markdown" {
-                    files.push(DirEntry {
+                    files.push(VaultDirEntry {
                         name,
                         path: path_str,
                         is_dir: false,
@@ -385,7 +403,7 @@ fn list_directory_impl(path: &Path) -> Result<Vec<DirEntry>, String> {
 }
 
 #[tauri::command]
-fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
+fn list_directory(path: String) -> Result<Vec<VaultDirEntry>, String> {
     let path = Path::new(&path);
     if !path.exists() {
         return Err("Path does not exist".to_string());
@@ -417,6 +435,85 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 #[tauri::command]
 fn scan_markdown_files(vault_path: String) -> Result<Vec<FileInfo>, String> {
     scan_markdown_files_impl(&vault_path)
+}
+
+// Search all files that are closest related to the query
+// For example, if the query is "Cooking", it will return the files that are most related to Cooking
+// Combined with clustering, this allows the user to define a cluster of files that are related to the query
+#[tauri::command]
+async fn async_semantic_search(
+    query: String,
+    top_k: usize,
+    file_embeddings: &mut HashMap<usize, FileEmbedding>,
+) -> Result<Vec<(FileEmbedding, f32)>, String> {
+
+    semantic_search::semantic_search(query, top_k, file_embeddings).await
+}
+
+// Search all files in the vault that are closest related to the query
+// For example, if the query is "Cooking", it will return the files that are most related to Cooking
+// Combined with clustering, this allows the user to define a cluster of files that are related to the query
+#[tauri::command]
+async fn vault_semantic_search(
+    vault_path: String,
+    query: String,
+    top_k: usize,
+) -> Result<Vec<(FileEmbedding, f32)>, String> {
+    semantic_search::vault_semantic_search(vault_path, query, top_k).await
+}
+
+// Load the files that are linked to the file
+// This will search a returns a list of files that are linked to the text of the target file
+pub fn load_neighbor_files_from_file(file_path: &str) -> Result<Vec<FileInfo>, String> { 
+    semantic_search::load_neighbors(file_path)
+}
+
+// Get the top related files to the file
+// This will search the vault and return the top related files to the file semantically
+// for example, if the file is about "Cooking", it will return the files that are most related the meaning of that file
+// Combined with clustering, this allows the user to define a cluster of files that are related to the query
+pub async fn get_top_related_files(
+    top_neighbors: usize,
+    file_path: &str,
+) -> Result<Vec<(FileEmbedding, f32)>, String> {
+    semantic_search::get_top_related_files(top_neighbors, file_path).await
+}
+
+// Enrich the file with examples
+pub async fn enrich_file_with_examples(
+    file_path: &str,
+) -> Result<EnrichedFile, String> {
+    enrich::enrich_file_with_examples(file_path).await
+}
+
+// Detect missing knowledge in the file
+// This will identify missing, incomplete, or unclear knowledge in the note
+// and suggest additions to the note to improve its completeness and clarity
+pub async fn detect_missing_knowledge(file_path: &str) -> Result<EnrichedFile, String> {
+    enrich::detect_missing_knowledge(file_path).await
+}
+
+// Enrich the file by explaining the definitions of the terms in the file
+pub async fn enrich_file_definitions(
+    file_path: &str,
+) -> Result<EnrichedFile, String> {
+    enrich::enrich_file_definitions(file_path).await
+}
+
+// Expand the file with missing details
+pub async fn expand_file_details(
+    file_path: &str,
+) -> Result<EnrichedFile, String> {
+    enrich::expand_file_details(file_path).await
+}
+
+// Enrich the file with the user's task
+// Allows the user to specify a custom type of enrichment for the file
+pub async fn enrich_file_custom(
+    file_path: &str,
+    user_task: &str,
+) -> Result<EnrichedFile, String> {
+    enrich::enrich_file_custom(file_path, user_task).await
 }
 
 
@@ -657,6 +754,7 @@ pub fn save_file(
     Ok(())
 }
 
+
 #[tauri::command]
 fn cluster_files_by_type(files: Vec<FileInfo>) -> Result<Vec<Cluster>, String> {
     use regex::Regex;
@@ -862,7 +960,8 @@ pub fn run() {
             scan_markdown_files,
             cluster_files_by_type,
             generate_summaries,
-            save_summary_to_vault
+            save_summary_to_vault,
+
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

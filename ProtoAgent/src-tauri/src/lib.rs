@@ -89,6 +89,65 @@ pub struct VaultIndexCache {
     pub store: Option<InMemoryVectorStore<rag_index::RagDocument>>,
 }
 
+/// Curated OpenAI chat models for the multi-agent stack (IDs align with `rig` `openai::completion` constants).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatModelOption {
+    pub id: String,
+    pub label: String,
+}
+
+/// `(model_id, display_label)` — keep in sync with [`list_chat_models`].
+const CURATED_CHAT_MODELS: &[(&str, &str)] = &[
+    (openai::GPT_4O, "GPT-4o"),
+    (openai::GPT_4O_MINI, "GPT-4o mini"),
+    (openai::GPT_4_TURBO, "GPT-4 Turbo"),
+    (openai::GPT_5, "GPT-5"),
+    (openai::GPT_5_MINI, "GPT-5 mini"),
+    (openai::GPT_5_NANO, "GPT-5 nano"),
+    (openai::O3_MINI, "o3-mini"),
+    (openai::O4_MINI, "o4-mini"),
+];
+
+fn resolve_chat_model(model: Option<String>) -> Result<String, String> {
+    let id = model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| openai::GPT_4O_MINI.to_string());
+    if CURATED_CHAT_MODELS
+        .iter()
+        .any(|(mid, _)| *mid == id.as_str())
+    {
+        Ok(id)
+    } else {
+        Err(format!(
+            "Unknown chat model \"{}\". Pick a model from the list.",
+            id
+        ))
+    }
+}
+
+#[tauri::command]
+fn list_chat_models() -> Vec<ChatModelOption> {
+    CURATED_CHAT_MODELS
+        .iter()
+        .map(|(id, label)| ChatModelOption {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// How many RAG chunks to inject via [`AgentBuilder::dynamic_context`] (default 20).
+const DEFAULT_RAG_CONTEXT_TOP_K: usize = 20;
+const MIN_RAG_CONTEXT_TOP_K: usize = 1;
+const MAX_RAG_CONTEXT_TOP_K: usize = 50;
+
+fn resolve_rag_context_top_k(k: Option<u32>) -> usize {
+    k.map(|n| n as usize)
+        .unwrap_or(DEFAULT_RAG_CONTEXT_TOP_K)
+        .clamp(MIN_RAG_CONTEXT_TOP_K, MAX_RAG_CONTEXT_TOP_K)
+}
+
 // Helper function to read API key from config file
 pub fn get_openai_api_key() -> Result<String, String> {
     // First try environment variable
@@ -132,13 +191,15 @@ async fn ask_agent_impl(
     app: tauri::AppHandle,
     prompt: String,
     vault_path: Option<String>,
+    chat_model: String,
+    rag_context_top_k: usize,
 ) -> Result<String, String> {
     let api_key = get_openai_api_key()?;
     let client: openai::Client = openai::Client::new(api_key).map_err(|e| e.to_string())?;
 
     // Summary specialist: handles summarization
     let summary_agent = client
-        .agent(openai::GPT_4O_MINI)
+        .agent(chat_model.as_str())
         .name("summary_agent")
         .preamble("You are a summarizing agent. Your job is to take the content of one or more \
             markdown files and produce a summary in the form of markdown. Add a note at the top \
@@ -149,7 +210,7 @@ async fn ask_agent_impl(
     let find_duplicates = agent_tools::FindDuplicatesTool { app: app.clone() };
     let find_related = agent_tools::FindRelatedFilesTool { app: app.clone() };
     let vault_agent = client
-        .agent(openai::GPT_4O_MINI)
+        .agent(chat_model.as_str())
         .name("vault_agent")
         .description("Handles vault operations: finding duplicate markdown files and semantically related files. Call with the vault path and the operation (find duplicates or find related files).")
         .preamble("You are a vault operations specialist. You receive requests to find duplicate files or semantically related files. Use the vault path provided in the request with the appropriate tool (find_duplicates or find_related_files).")
@@ -170,7 +231,7 @@ async fn ask_agent_impl(
 
     // RAG: build or retrieve vault index for dynamic context
     let mut agent_builder = client
-        .agent(openai::GPT_4O_MINI)
+        .agent(chat_model.as_str())
         .preamble(&preamble)
         .tool(summary_agent)
         .tool(vault_agent);
@@ -198,7 +259,9 @@ async fn ask_agent_impl(
                 preamble.push_str(" When relevant, use the retrieved vault documents below to answer. Cite file names when you use them.");
                 let embedding_model = client.embedding_model(openai::TEXT_EMBEDDING_3_SMALL);
                 let index = store.clone().index(embedding_model);
-                agent_builder = agent_builder.preamble(&preamble).dynamic_context(3, index);
+                agent_builder = agent_builder
+                    .preamble(&preamble)
+                    .dynamic_context(rag_context_top_k, index);
             }
         }
     }
@@ -217,8 +280,12 @@ async fn ask_agent(
     state: tauri::State<'_, Mutex<VaultIndexCache>>,
     prompt: String,
     vault_path: Option<String>,
+    model: Option<String>,
+    rag_context_top_k: Option<u32>,
 ) -> Result<String, String> {
-    ask_agent_impl(Some(&*state), app, prompt, vault_path).await
+    let chat_model = resolve_chat_model(model)?;
+    let k = resolve_rag_context_top_k(rag_context_top_k);
+    ask_agent_impl(Some(&*state), app, prompt, vault_path, chat_model, k).await
 }
 
 
@@ -813,7 +880,9 @@ async fn generate_summaries(
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<VaultIndexCache>>,
     clusters: Vec<Cluster>,
+    model: Option<String>,
 ) -> Result<MasterSummary, String> {
+    let chat_model = resolve_chat_model(model)?;
     let mut cluster_summaries = Vec::new();
     let mut total_files = 0;
     let mut document_types = Vec::new();
@@ -829,7 +898,7 @@ async fn generate_summaries(
         let markdown_content = read_markdown_contents(&cluster.files)?;
         
         // Call OpenAI Assistant to generate summary
-        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None).await {
+        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None, chat_model.clone(), DEFAULT_RAG_CONTEXT_TOP_K).await {
             Ok(s) => s,
             Err(e) => {
                 // Fallback to simple summary if API call fails
@@ -864,7 +933,7 @@ async fn generate_summaries(
             .join("\n\n")
     );
 
-    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None).await {
+    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None, chat_model, DEFAULT_RAG_CONTEXT_TOP_K).await {
         Ok(s) => s,
         Err(e) => {
             // Fallback to simple overview if API call fails
@@ -950,6 +1019,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             ask_agent,
+            list_chat_models,
             list_directory,
             read_file,
             write_file,

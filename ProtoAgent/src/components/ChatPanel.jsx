@@ -28,6 +28,7 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
   const [error, setError] = useState(null);
   const [modelOptions, setModelOptions] = useState([]);
   const [selectedModel, setSelectedModel] = useState("");
@@ -88,6 +89,7 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
     setInput("");
     setError(null);
     setProgressMessage("");
+    setStopPending(false);
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setLoading(true);
 
@@ -115,12 +117,14 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
       }
     } finally {
       setLoading(false);
+      setStopPending(false);
       setProgressMessage("");
     }
   };
 
   const handleStop = () => {
-    if (!loading) return;
+    if (!loading || stopPending) return;
+    setStopPending(true);
     invoke("cancel_chat").catch(() => {});
   };
 
@@ -221,6 +225,7 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
           <div className="chat-message chat-message-assistant">
             <span className="chat-message-role">AI</span>
             <div className="chat-message-content chat-loading" aria-live="polite">
+              <span className="chat-spinner chat-spinner-inline" aria-hidden />
               <span className="chat-progress-text">
                 {progressMessage || "Thinking…"}
               </span>
@@ -247,12 +252,19 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
         <div className="chat-input-buttons">
           <button
             type="button"
-            className="chat-stop-btn"
+            className={`chat-stop-btn${loading && stopPending ? " chat-stop-btn-busy" : ""}`}
             onClick={handleStop}
             disabled={!loading}
-            title="Stop generation"
+            title={
+              stopPending ? "Stopping…" : "Stop generation"
+            }
           >
-            Stop
+            <span className="chat-stop-btn-label">Stop</span>
+            {loading && stopPending ? (
+              <span className="chat-stop-btn-spinner-layer" aria-hidden>
+                <span className="chat-spinner chat-spinner-on-btn" />
+              </span>
+            ) : null}
           </button>
           <button
             className="chat-send-btn"

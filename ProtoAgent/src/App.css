@@ -789,8 +789,45 @@ body, html, #root {
   word-wrap: break-word;
 }
 
+@keyframes chat-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.chat-spinner {
+  display: inline-block;
+  border-radius: 50%;
+  border-style: solid;
+  border-color: rgba(212, 212, 212, 0.2);
+  border-top-color: #c0c0c0;
+  animation: chat-spinner-rotate 0.65s linear infinite;
+  vertical-align: middle;
+}
+
+.chat-spinner-inline {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+  flex-shrink: 0;
+}
+
+.chat-spinner-on-btn {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+  border-color: rgba(224, 224, 224, 0.25);
+  border-top-color: #f0f0f0;
+}
+
 .chat-message-content.chat-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   color: #888;
+}
+
+.chat-progress-text {
   font-style: italic;
 }
 
@@ -861,10 +898,26 @@ body, html, #root {
 }
 
 .chat-stop-btn {
+  position: relative;
   padding: 8px 14px;
   background-color: #3c3c3c;
   border: 1px solid #555;
   color: #e0e0e0;
+  min-height: 36px;
+  min-width: 72px;
+}
+
+.chat-stop-btn-busy .chat-stop-btn-label {
+  opacity: 0.22;
+}
+
+.chat-stop-btn-spinner-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .chat-stop-btn:hover:not(:disabled) {
@@ -876,8 +929,9 @@ body, html, #root {
   cursor: not-allowed;
 }
 
-.chat-progress-text {
-  font-style: italic;
+.chat-stop-btn-busy:disabled {
+  opacity: 1;
+  cursor: pointer;
 }
 
 .chat-send-btn:disabled {

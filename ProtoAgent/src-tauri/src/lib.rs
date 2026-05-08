@@ -13,7 +13,7 @@ use rig::providers::azure::TEXT_EMBEDDING_3_LARGE;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use crate::enrich::EnrichedFile;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
@@ -1582,6 +1582,95 @@ fn reject_markdown_proposal(
     markdown_proposals::reject_markdown_proposal_impl(&store, &proposal_id)
 }
 
+fn resolve_existing_markdown_file_under_vault(
+    vault_path: &str,
+    file_path: &str,
+) -> Result<PathBuf, String> {
+    let vault = fs::canonicalize(vault_path)
+        .map_err(|e| format!("Could not resolve vault path: {}", e))?;
+    let file = fs::canonicalize(file_path)
+        .map_err(|e| format!("Could not resolve file path: {}", e))?;
+
+    if !file.starts_with(&vault) {
+        return Err("File is outside the selected vault.".to_string());
+    }
+    if !file.is_file() {
+        return Err("Selected path is not a file.".to_string());
+    }
+
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext != "md" && ext != "markdown" {
+        return Err("Selected file must be a markdown file.".to_string());
+    }
+
+    Ok(file)
+}
+
+#[tauri::command]
+async fn propose_enrich_file(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SharedProposalStore>,
+    vault_path: String,
+    file_path: String,
+    mode: String,
+    custom_task: Option<String>,
+) -> Result<markdown_proposals::MarkdownProposalEvent, String> {
+    let resolved = resolve_existing_markdown_file_under_vault(&vault_path, &file_path)?;
+    let previous_content = fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
+    let resolved_string = resolved.to_string_lossy().to_string();
+
+    let enriched = match mode.as_str() {
+        "expand_details" => enrich::expand_file_details(&resolved_string).await?,
+        "add_examples" => enrich::enrich_file_with_examples(&resolved_string).await?,
+        "detect_missing_knowledge" => enrich::detect_missing_knowledge(&resolved_string).await?,
+        "add_definitions" => enrich::enrich_file_definitions(&resolved_string).await?,
+        "custom" => {
+            let task = custom_task
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Custom enrichment needs instructions.".to_string())?;
+            enrich::enrich_file_custom(&resolved_string, task).await?
+        }
+        _ => return Err(format!("Unknown enrichment mode: {}", mode)),
+    };
+
+    if enriched.content == previous_content {
+        return Err("The enrichment did not produce any changes.".to_string());
+    }
+
+    let vault = fs::canonicalize(&vault_path)
+        .map_err(|e| format!("Could not resolve vault path: {}", e))?;
+    let rel_display = markdown_proposals::relative_display(&vault, &resolved);
+    let absolute_path = resolved.to_string_lossy().to_string();
+    let proposal = markdown_proposals::PendingProposal::Edit {
+        absolute_path: absolute_path.clone(),
+        relative_path: rel_display,
+        previous_content,
+        new_content: enriched.content,
+    };
+
+    let id = Uuid::new_v4().to_string();
+    let event = proposal.to_event(&id);
+    {
+        let mut map = store.lock().map_err(|e| e.to_string())?;
+        map.insert(id, proposal);
+    }
+    app.emit("markdown-proposal", event.clone())
+        .map_err(|e| e.to_string())?;
+
+    Ok(event)
+}
+
+#[tauri::command]
+async fn suggest_next_actions(file_path: String) -> Result<String, String> {
+    enrich::suggest_next_actions(&file_path).await
+}
+
 #[tauri::command]
 fn list_pending_markdown_proposals(
     store: tauri::State<'_, SharedProposalStore>,
@@ -1625,6 +1714,8 @@ pub fn run() {
             cluster_files_by_type,
             generate_summaries,
             save_summary_to_vault,
+            propose_enrich_file,
+            suggest_next_actions,
             apply_markdown_proposal,
             apply_markdown_proposals_batch,
             reject_markdown_proposal,

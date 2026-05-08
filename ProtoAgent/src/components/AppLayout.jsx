@@ -5,6 +5,7 @@ import FolderSelector from "./FolderSelector";
 import ProjectExplorer from "./ProjectExplorer";
 import VersionHistoryPanel from "./VersionHistoryPanel";
 import MarkdownEditor from "./MarkdownEditor";
+import NoteActionsPanel from "./NoteActionsPanel";
 import ChatPanel from "./ChatPanel";
 import ScanResultsPanel from "./ScanResultsPanel";
 import MarkdownProposalsPanel from "./MarkdownProposalsPanel";
@@ -164,6 +165,10 @@ export default function AppLayout() {
 
       {/* Main content - Markdown Editor */}
       <main className="main-content">
+        <NoteActionsPanel
+          vaultPath={vaultPath}
+          filePath={openFilePath}
+        />
         <MarkdownEditor
           filePath={openFilePath}
           vaultPath={vaultPath}

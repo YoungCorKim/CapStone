@@ -42,13 +42,18 @@ pub struct EnrichedFile {
     pub frontmatter: Option<String>,
 }
 
-async fn call_llm(client: &Client, api_key: &str, user_prompt: &str) -> Result<String, String> {
+async fn call_llm_with_system(
+    client: &Client,
+    api_key: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
     let body = ChatRequest {
         model: EXPAND_MODEL,
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: "You follow instructions exactly. Return only the expanded Markdown note body (no YAML frontmatter, no preamble).".to_string(),
+                content: system_prompt.to_string(),
             },
             ChatMessage {
                 role: "user",
@@ -86,6 +91,16 @@ async fn call_llm(client: &Client, api_key: &str, user_prompt: &str) -> Result<S
         .map(|c| c.message.content.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "Empty response from OpenAI".to_string())
+}
+
+async fn call_llm(client: &Client, api_key: &str, user_prompt: &str) -> Result<String, String> {
+    call_llm_with_system(
+        client,
+        api_key,
+        "You follow instructions exactly. Return only the expanded Markdown note body (no YAML frontmatter, no preamble).",
+        user_prompt,
+    )
+    .await
 }
 
 pub async fn expand_file_details(
@@ -163,6 +178,72 @@ pub async fn enrich_file_definitions(
 "#;
 
     enrich_file(file_path, task).await
+}
+
+pub async fn suggest_next_actions(file_path: &str) -> Result<String, String> {
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read file {}: {}", file_path, e))?;
+
+    let extracted = extract_frontmatter(&content);
+    let content_without_frontmatter = extracted.content;
+
+    let neighbors = load_neighbors(file_path)?;
+    let mut context = String::new();
+    for neighbor in neighbors.iter().take(5) {
+        context.push_str("\n\n");
+        match fs::read_to_string(&neighbor.path) {
+            Ok(neighbor_content) => {
+                let n = extract_frontmatter(&neighbor_content);
+                context.push_str(&format!("--- Related note: {} ---\n", neighbor.path));
+                context.push_str(&n.content);
+            }
+            Err(e) => return Err(format!("Failed to read neighbor {}: {}", neighbor.path, e)),
+        }
+    }
+
+    let prompt = format!(
+        r#"
+Analyze this note as part of a personal knowledge vault.
+
+Rules:
+- Use the target note as the primary source of truth
+- Use related notes only for context
+- Do not invent facts
+- Be concise and actionable
+- Prefer next actions that help the user make progress immediately
+
+Return Markdown with these sections:
+
+## Recommended Next Actions
+- [High/Medium/Low] action - why it matters
+
+## Missing Questions
+- Question to answer next
+
+## Suggested Follow-Up Notes
+- Note title - what it should contain
+
+## Quick Win
+One next step that can be done in 5 minutes.
+
+[Target Note]
+{}
+
+[Related Notes]
+{}
+"#,
+        content_without_frontmatter, context
+    );
+
+    let api_key = get_openai_api_key()?;
+    let client = Client::new();
+    call_llm_with_system(
+        &client,
+        &api_key,
+        "You are a concise planning assistant. Return only the requested Markdown action plan.",
+        &prompt,
+    )
+    .await
 }
 
 async fn enrich_file(file_path: &str, task: &str) -> Result<EnrichedFile, String> {

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import FolderSelector from "./FolderSelector";
 import ProjectExplorer from "./ProjectExplorer";
+import VersionHistoryPanel from "./VersionHistoryPanel";
 import MarkdownEditor from "./MarkdownEditor";
 import ChatPanel from "./ChatPanel";
 import ScanResultsPanel from "./ScanResultsPanel";
@@ -17,6 +18,7 @@ export default function AppLayout() {
   const [resultsPanelCollapsed, setResultsPanelCollapsed] = useState(true);
   const [markdownProposals, setMarkdownProposals] = useState([]);
   const [markdownPanelCollapsed, setMarkdownPanelCollapsed] = useState(false);
+  const [explorerTab, setExplorerTab] = useState("files");
 
   const handleFolderSelected = (path) => {
     setVaultPath(path);
@@ -113,20 +115,49 @@ export default function AppLayout() {
         </div>
         {!explorerCollapsed && (
           <div className="sidebar-content">
-            <FolderSelector
-              onFolderSelected={handleFolderSelected}
-              vaultPath={vaultPath}
-              compact
-            />
-            <ProjectExplorer
-              vaultPath={vaultPath}
-              openFilePath={openFilePath}
-              onFileSelect={setOpenFilePath}
-              onScanResults={(type, pairs) => {
-                setScanResults({ type, pairs });
-                setResultsPanelCollapsed(false);
-              }}
-            />
+            <div className="explorer-tabs" role="tablist" aria-label="Explorer">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={explorerTab === "files"}
+                className={`explorer-tab ${explorerTab === "files" ? "active" : ""}`}
+                onClick={() => setExplorerTab("files")}
+              >
+                Files
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={explorerTab === "history"}
+                className={`explorer-tab ${explorerTab === "history" ? "active" : ""}`}
+                onClick={() => setExplorerTab("history")}
+              >
+                History
+              </button>
+            </div>
+            {explorerTab === "files" ? (
+              <>
+                <FolderSelector
+                  onFolderSelected={handleFolderSelected}
+                  vaultPath={vaultPath}
+                  compact
+                />
+                <ProjectExplorer
+                  vaultPath={vaultPath}
+                  openFilePath={openFilePath}
+                  onFileSelect={setOpenFilePath}
+                  onScanResults={(type, pairs) => {
+                    setScanResults({ type, pairs });
+                    setResultsPanelCollapsed(false);
+                  }}
+                />
+              </>
+            ) : (
+              <VersionHistoryPanel
+                currentFilePath={openFilePath}
+                onOpenFile={setOpenFilePath}
+              />
+            )}
           </div>
         )}
       </aside>

@@ -131,6 +131,287 @@ body, html, #root {
   padding: 8px;
 }
 
+/* ========== Explorer tabs (Files / History) ========== */
+.explorer-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #3c3c3c;
+  padding-bottom: 6px;
+}
+
+.explorer-tab {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: #2d2d2d;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.explorer-tab:hover {
+  background: #383838;
+  color: #fff;
+}
+
+.explorer-tab.active {
+  background: #0e639c;
+  color: #fff;
+  border-color: #1177bb;
+}
+
+.version-history-panel {
+  font-size: 12px;
+  color: #ccc;
+}
+
+.version-history-toolbar {
+  margin-bottom: 10px;
+}
+
+.version-history-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.version-history-label {
+  color: #888;
+}
+
+.version-history-segments {
+  display: flex;
+  border: 1px solid #444;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.version-history-seg {
+  padding: 4px 8px;
+  font-size: 11px;
+  border: none;
+  background: #2d2d2d;
+  color: #aaa;
+  cursor: pointer;
+}
+
+.version-history-seg.active {
+  background: #0e639c;
+  color: #fff;
+}
+
+.version-history-refresh,
+.version-history-clear {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid #555;
+  background: #2d2d2d;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.version-history-clear:hover,
+.version-history-refresh:hover {
+  background: #383838;
+}
+
+.version-history-clear {
+  margin-left: auto;
+  color: #f0a070;
+}
+
+.version-history-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #888;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.version-history-hint {
+  color: #888;
+  margin: 0 0 8px;
+}
+
+.version-history-error {
+  background: rgba(244, 67, 54, 0.15);
+  border: 1px solid rgba(244, 67, 54, 0.4);
+  padding: 8px;
+  border-radius: 4px;
+  color: #ff8a80;
+  margin-bottom: 8px;
+}
+
+.version-history-empty {
+  color: #888;
+  padding: 8px 0;
+}
+
+.version-history-groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.version-history-group {
+  margin-bottom: 12px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #252526;
+}
+
+.version-history-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #333;
+  background: #1e1e1e;
+}
+
+.version-history-group-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.version-history-count {
+  font-weight: 400;
+  color: #888;
+}
+
+.version-history-batch-restore {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid #1177bb;
+  background: #0e639c;
+  color: #fff;
+  cursor: pointer;
+}
+
+.version-history-batch-restore:hover:not(:disabled) {
+  background: #1177bb;
+}
+
+.version-history-batch-restore:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.version-history-entries {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+}
+
+.version-history-entry {
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.version-history-entry:last-child {
+  border-bottom: none;
+}
+
+.version-history-entry-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px;
+}
+
+.version-history-expand {
+  flex-shrink: 0;
+  width: 24px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.version-history-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.version-history-time {
+  font-size: 10px;
+  color: #888;
+}
+
+.version-history-source,
+.version-history-path {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.version-history-batch-tag {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: #3d3d20;
+  color: #cddc39;
+}
+
+.version-history-restore-one {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid #555;
+  background: #383838;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+.version-history-restore-one:hover:not(:disabled) {
+  background: #444;
+}
+
+.version-history-preview {
+  padding: 4px 8px 10px 32px;
+  border-top: 1px solid #2a2a2a;
+}
+
+.version-history-preview details {
+  margin-bottom: 6px;
+}
+
+.version-history-preview summary {
+  cursor: pointer;
+  color: #8ab4f8;
+  font-size: 11px;
+}
+
+.version-history-pre {
+  margin: 4px 0 0;
+  padding: 6px;
+  max-height: 160px;
+  overflow: auto;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
 /* ========== Main Content ========== */
 .main-content {
   flex: 1;
@@ -517,6 +798,12 @@ body, html, #root {
   color: #f44336;
 }
 
+.chat-message-content.chat-message-stopped {
+  opacity: 0.9;
+  font-style: italic;
+  color: #a0a0a0;
+}
+
 .chat-input-error {
   padding: 8px 12px;
   background-color: rgba(244, 67, 54, 0.2);
@@ -750,6 +1037,32 @@ body, html, #root {
   flex-direction: column;
   height: 100%;
   max-height: min(260px, 40vh);
+}
+
+.markdown-proposals-header-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.markdown-proposals-accept-all {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid #2e7d32;
+  background: #1b5e20;
+  color: #fff;
+  cursor: pointer;
+}
+
+.markdown-proposals-accept-all:hover:not(:disabled) {
+  background: #2e7d32;
+}
+
+.markdown-proposals-accept-all:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .markdown-proposals-header {

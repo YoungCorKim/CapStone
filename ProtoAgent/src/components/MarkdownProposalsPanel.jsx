@@ -16,6 +16,7 @@ export default function MarkdownProposalsPanel({
   onClosePanel,
 }) {
   const [busyId, setBusyId] = useState(null);
+  const [acceptAllBusy, setAcceptAllBusy] = useState(false);
   const [error, setError] = useState(null);
 
   const handleAccept = async (id) => {
@@ -31,6 +32,37 @@ export default function MarkdownProposalsPanel({
       setError(String(err));
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const handleAcceptAll = async () => {
+    if (proposals.length < 2) return;
+    if (
+      !window.confirm(
+        `Accept all ${proposals.length} proposals in one batch? They will share one version-history batch id.`
+      )
+    ) {
+      return;
+    }
+    setAcceptAllBusy(true);
+    setError(null);
+    try {
+      const proposalIds = proposals.map((p) => p.id);
+      const paths = await invoke("apply_markdown_proposals_batch", {
+        proposalIds,
+      });
+      const last =
+        Array.isArray(paths) && paths.length
+          ? paths[paths.length - 1]
+          : null;
+      if (typeof last === "string" && last) {
+        onAppliedOpenFile?.(last);
+      }
+      proposalIds.forEach((id) => onRemove(id));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setAcceptAllBusy(false);
     }
   };
 
@@ -52,9 +84,22 @@ export default function MarkdownProposalsPanel({
   return (
     <div className="markdown-proposals-panel">
       <div className="markdown-proposals-header">
-        <span className="markdown-proposals-title">
-          Pending markdown ({proposals.length})
-        </span>
+        <div className="markdown-proposals-header-main">
+          <span className="markdown-proposals-title">
+            Pending markdown ({proposals.length})
+          </span>
+          {proposals.length > 1 && (
+            <button
+              type="button"
+              className="markdown-proposals-accept-all"
+              disabled={acceptAllBusy || busyId != null}
+              onClick={handleAcceptAll}
+              title="Accept all proposals as one batch"
+            >
+              {acceptAllBusy ? "Accepting…" : "Accept all"}
+            </button>
+          )}
+        </div>
         <button
           type="button"
           className="markdown-proposals-close"

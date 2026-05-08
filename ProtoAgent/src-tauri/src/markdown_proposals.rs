@@ -118,10 +118,19 @@ pub fn relative_display(vault: &Path, absolute: &Path) -> String {
         .unwrap_or_else(|| absolute.to_string_lossy().to_string())
 }
 
+#[derive(Debug, Clone)]
+pub struct AppliedProposalSnapshot {
+    pub absolute_path: String,
+    pub relative_path: String,
+    pub before_content: String,
+    pub after_content: String,
+    pub kind_create: bool,
+}
+
 pub fn apply_markdown_proposal_impl(
     store: &SharedProposalStore,
     id: &str,
-) -> Result<String, String> {
+) -> Result<AppliedProposalSnapshot, String> {
     let proposal = {
         let mut map = store.lock().map_err(|e| e.to_string())?;
         map.remove(id).ok_or_else(|| "Proposal not found".to_string())?
@@ -130,6 +139,7 @@ pub fn apply_markdown_proposal_impl(
     match proposal {
         PendingProposal::Create {
             absolute_path,
+            relative_path,
             content,
             ..
         } => {
@@ -142,11 +152,18 @@ pub fn apply_markdown_proposal_impl(
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            fs::write(path, content).map_err(|e| e.to_string())?;
-            Ok(absolute_path)
+            fs::write(path, &content).map_err(|e| e.to_string())?;
+            Ok(AppliedProposalSnapshot {
+                absolute_path,
+                relative_path,
+                before_content: String::new(),
+                after_content: content,
+                kind_create: true,
+            })
         }
         PendingProposal::Edit {
             absolute_path,
+            relative_path,
             previous_content,
             new_content,
             ..
@@ -162,8 +179,14 @@ pub fn apply_markdown_proposal_impl(
                         .to_string(),
                 );
             }
-            fs::write(path, new_content).map_err(|e| e.to_string())?;
-            Ok(absolute_path)
+            fs::write(path, &new_content).map_err(|e| e.to_string())?;
+            Ok(AppliedProposalSnapshot {
+                absolute_path,
+                relative_path,
+                before_content: previous_content,
+                after_content: new_content,
+                kind_create: false,
+            })
         }
     }
 }

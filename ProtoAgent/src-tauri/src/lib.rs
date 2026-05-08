@@ -2,6 +2,7 @@ mod agent_tools;
 mod chat_progress;
 mod markdown_proposals;
 mod markdown_tools;
+mod version_history;
 mod locality_sensitive_hashing_deduplicate;
 mod metadata_parser;
 mod pairwise_deduplicate;
@@ -18,6 +19,9 @@ use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 use std::env;
 use markdown_proposals::SharedProposalStore;
+use version_history::{
+    new_shared_store, SharedVersionHistoryStore, VersionHistoryEntry, VersionSource,
+};
 use rig::{
     client::CompletionClient,
     client::EmbeddingsClient,
@@ -323,7 +327,10 @@ fn map_prompt_outcome(result: Result<String, PromptError>) -> Result<String, Str
     match result {
         Ok(s) => Ok(s),
         Err(e) => match e {
-            PromptError::PromptCancelled { reason, .. } => Ok(format!("Request stopped. {}", reason)),
+            // Treat cancel as Err so SessionMemory is not persisted with dangling tool_calls.
+            PromptError::PromptCancelled { reason, .. } => {
+                Err(format!("Request stopped. {}", reason))
+            }
             _ => Err(e.to_string()),
         },
     }
@@ -1361,19 +1368,210 @@ fn cancel_chat(cancel_flag: tauri::State<'_, SharedChatCancel>) {
     cancel_flag.store(true, Ordering::SeqCst);
 }
 
+fn normalize_version_history_path_filter(
+    file_path: Option<String>,
+) -> Result<Option<String>, String> {
+    match file_path {
+        None => Ok(None),
+        Some(p) => {
+            let pb = Path::new(&p);
+            if pb.exists() {
+                let c = fs::canonicalize(pb).map_err(|e| e.to_string())?;
+                Ok(Some(c.to_string_lossy().to_string()))
+            } else {
+                Ok(Some(p))
+            }
+        }
+    }
+}
+
+fn record_proposal_snapshot(
+    vh: &SharedVersionHistoryStore,
+    snap: &markdown_proposals::AppliedProposalSnapshot,
+    batch_id: Option<String>,
+) -> Result<(), String> {
+    let source = if snap.kind_create {
+        VersionSource::ProposalCreate
+    } else {
+        VersionSource::ProposalEdit
+    };
+    let mut inner = vh.lock().map_err(|e| e.to_string())?;
+    inner.add_entry(
+        snap.relative_path.clone(),
+        snap.absolute_path.clone(),
+        snap.before_content.clone(),
+        snap.after_content.clone(),
+        source,
+        batch_id,
+    );
+    Ok(())
+}
+
+/// Reverts disk to `entry.before_content` (state before that accepted change). For
+/// `proposal_create` rows with empty `before_content`, deletes the file instead. Then removes
+/// the history row.
+fn apply_revert_snapshot(
+    app: &tauri::AppHandle,
+    vh: &SharedVersionHistoryStore,
+    snapshot_entry: &VersionHistoryEntry,
+    removed_entry_id: &str,
+) -> Result<(), String> {
+    let path = Path::new(&snapshot_entry.absolute_path);
+
+    let undo_create = snapshot_entry.source == "proposal_create"
+        && snapshot_entry.before_content.is_empty();
+
+    if undo_create {
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(path, &snapshot_entry.before_content).map_err(|e| e.to_string())?;
+    }
+
+    {
+        let mut inner = vh.lock().map_err(|e| e.to_string())?;
+        inner.remove_entry_by_id(removed_entry_id)?;
+    }
+
+    app.emit(
+        "vault-tree-changed",
+        serde_json::json!({ "path": snapshot_entry.absolute_path.clone() }),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn apply_markdown_proposal(
     app: tauri::AppHandle,
     store: tauri::State<'_, SharedProposalStore>,
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
     proposal_id: String,
 ) -> Result<String, String> {
-    let path = markdown_proposals::apply_markdown_proposal_impl(&store, &proposal_id)?;
+    let snap =
+        markdown_proposals::apply_markdown_proposal_impl(&store, &proposal_id)?;
+    record_proposal_snapshot(&version_history_store, &snap, None)?;
     app.emit(
         "vault-tree-changed",
-        serde_json::json!({ "path": path.clone() }),
+        serde_json::json!({ "path": snap.absolute_path.clone() }),
     )
     .map_err(|e| e.to_string())?;
-    Ok(path)
+    Ok(snap.absolute_path)
+}
+
+/// Apply several pending markdown proposals sharing one batch id in version history.
+#[tauri::command]
+fn apply_markdown_proposals_batch(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SharedProposalStore>,
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
+    proposal_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    if proposal_ids.is_empty() {
+        return Err("No proposals selected".to_string());
+    }
+    let batch_id = Uuid::new_v4().to_string();
+    let mut paths = Vec::new();
+    for id in proposal_ids {
+        let snap =
+            markdown_proposals::apply_markdown_proposal_impl(&store, &id)?;
+        record_proposal_snapshot(&version_history_store, &snap, Some(batch_id.clone()))?;
+        paths.push(snap.absolute_path.clone());
+        app.emit(
+            "vault-tree-changed",
+            serde_json::json!({ "path": snap.absolute_path.clone() }),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(paths)
+}
+
+#[tauri::command]
+fn list_version_history(
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
+    file_path: Option<String>,
+    batch_id: Option<String>,
+) -> Result<Vec<VersionHistoryEntry>, String> {
+    let file_key = normalize_version_history_path_filter(file_path)?;
+    let inner = version_history_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(inner.list_entries(file_key.as_deref(), batch_id.as_deref()))
+}
+
+#[tauri::command]
+fn restore_file_version(
+    app: tauri::AppHandle,
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
+    version_id: String,
+) -> Result<String, String> {
+    let entry = {
+        let inner = version_history_store
+            .lock()
+            .map_err(|e| e.to_string())?;
+        inner
+            .get_entry(&version_id)
+            .ok_or_else(|| "Version not found.".to_string())?
+    };
+    apply_revert_snapshot(
+        &app,
+        &version_history_store,
+        &entry,
+        version_id.as_str(),
+    )?;
+    Ok(entry.absolute_path)
+}
+
+#[tauri::command]
+fn restore_batch(
+    app: tauri::AppHandle,
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
+    batch_id: String,
+) -> Result<Vec<String>, String> {
+    let ordered_ids = {
+        let inner = version_history_store
+            .lock()
+            .map_err(|e| e.to_string())?;
+        inner.batch_ids_in_order(&batch_id)
+    };
+    if ordered_ids.is_empty() {
+        return Err("Batch not found or has no recorded versions.".to_string());
+    }
+    let mut paths = Vec::new();
+    for id in ordered_ids {
+        let entry = {
+            let inner = version_history_store
+                .lock()
+                .map_err(|e| e.to_string())?;
+            inner
+                .get_entry(&id)
+                .ok_or_else(|| format!("Missing history entry: {}", id))?
+        };
+        let id_rm = id.clone();
+        apply_revert_snapshot(
+            &app,
+            &version_history_store,
+            &entry,
+            id_rm.as_str(),
+        )?;
+        paths.push(entry.absolute_path);
+    }
+    Ok(paths)
+}
+
+#[tauri::command]
+fn clear_version_history(
+    version_history_store: tauri::State<'_, SharedVersionHistoryStore>,
+) -> Result<(), String> {
+    let mut inner = version_history_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    inner.clear_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1411,6 +1609,7 @@ pub fn run() {
         .manage(std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::<String, markdown_proposals::PendingProposal>::new(),
         )) as SharedProposalStore)
+        .manage(new_shared_store())
         .invoke_handler(tauri::generate_handler![
             ask_agent,
             cancel_chat,
@@ -1427,8 +1626,13 @@ pub fn run() {
             generate_summaries,
             save_summary_to_vault,
             apply_markdown_proposal,
+            apply_markdown_proposals_batch,
             reject_markdown_proposal,
             list_pending_markdown_proposals,
+            list_version_history,
+            restore_file_version,
+            restore_batch,
+            clear_version_history,
 
         ])
         .run(tauri::generate_context!())

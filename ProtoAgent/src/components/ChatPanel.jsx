@@ -100,11 +100,19 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
       });
       setMessages((prev) => [...prev, { role: "assistant", content: response }]);
     } catch (err) {
-      setError(String(err));
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: null, error: String(err) },
-      ]);
+      const msg = String(err);
+      if (msg.startsWith("Request stopped")) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: msg, stopped: true },
+        ]);
+      } else {
+        setError(msg);
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: null, error: msg },
+        ]);
+      }
     } finally {
       setLoading(false);
       setProgressMessage("");
@@ -198,7 +206,9 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
             <span className="chat-message-role">
               {msg.role === "user" ? "You" : "AI"}
             </span>
-            <div className="chat-message-content">
+            <div
+              className={`chat-message-content${msg.stopped ? " chat-message-stopped" : ""}`}
+            >
               {msg.error ? (
                 <span className="chat-error">{msg.error}</span>
               ) : (

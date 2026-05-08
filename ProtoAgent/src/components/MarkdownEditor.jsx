@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+function pathsEffectivelyEqual(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const na = String(a).replace(/\\/g, "/");
+  const nb = String(b).replace(/\\/g, "/");
+  return na === nb;
+}
 
 export default function MarkdownEditor({ filePath, vaultPath }) {
   const [content, setContent] = useState("");
@@ -28,6 +37,19 @@ export default function MarkdownEditor({ filePath, vaultPath }) {
   useEffect(() => {
     loadFile();
   }, [loadFile]);
+
+  useEffect(() => {
+    if (!filePath) return undefined;
+    const unlisten = listen("vault-tree-changed", (event) => {
+      const p = event?.payload?.path;
+      if (typeof p === "string" && pathsEffectivelyEqual(p, filePath)) {
+        loadFile();
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [filePath, loadFile]);
 
   const hasUnsavedChanges = content !== originalContent;
 

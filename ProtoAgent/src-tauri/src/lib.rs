@@ -34,11 +34,13 @@ mod test;
 mod enrich;
 use std::collections::{HashMap, HashSet};
 
-use crate::chat_progress::{ChatUiHook, SharedChatCancel};
+use crate::chat_progress::{ChatUiHook, SessionLogger, SharedChatCancel};
+use chrono::Utc;
 use crate::locality_sensitive_hashing_deduplicate::{FileEmbedding, deduplicate_directory, generate_embedded_files};
 use semantic_clustering::semantic_clustering_from_file_embeddings;
 use locality_sensitive_hashing_deduplicate::group_embeddings;
 use crate::pairwise_deduplicate::identify_duplicate_pairs;
+use uuid::Uuid;
 
 const TEXT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
@@ -351,19 +353,88 @@ async fn ask_agent_impl(
 
     let agent = agent_builder.build();
 
-    let outcome = if let Some(cancel) = chat_cancel {
-        let hook = ChatUiHook {
-            app: app.clone(),
-            cancel,
-        };
-        agent
-            .prompt(&prompt)
-            .max_turns(8)
-            .with_hook(hook)
-            .await
-    } else {
-        agent.prompt(&prompt).max_turns(8).await
+    // Create a timestamped NDJSON log file for this prompt session.
+    // This is intentionally "best effort": logging should not break the app.
+    let (session_logger, cancel_for_hook) = {
+        let session_id = Uuid::new_v4().to_string();
+        let timestamp = Utc::now()
+            .format("%Y-%m-%dT%H-%M-%S%.3fZ")
+            .to_string();
+
+        let ndjson_filename = format!("session_{session_id}_{timestamp}.ndjson");
+        let timeline_filename = format!("session_{session_id}_{timestamp}.timeline.log");
+        let readable_filename = format!("session_{session_id}_{timestamp}.readable.log");
+
+        // Write logs to the standard app log dir and also repo-local logs for easier discovery.
+        let primary_dir = app
+            .path()
+            .app_log_dir()
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|_| std::env::temp_dir().join("protoagent-session-logs"));
+        let repo_logs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("logs"));
+
+        let mut log_dirs = vec![primary_dir];
+        if let Some(repo_dir) = repo_logs_dir {
+            log_dirs.push(repo_dir);
+        }
+
+        let ndjson_paths = log_dirs
+            .iter()
+            .map(|d| d.join(&ndjson_filename))
+            .collect::<Vec<_>>();
+        let timeline_paths = log_dirs
+            .iter()
+            .map(|d| d.join(&timeline_filename))
+            .collect::<Vec<_>>();
+        let readable_paths = log_dirs
+            .iter()
+            .map(|d| d.join(&readable_filename))
+            .collect::<Vec<_>>();
+
+        let logger =
+            SessionLogger::new(session_id.clone(), ndjson_paths, timeline_paths, readable_paths)
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| {
+                eprintln!("Session logging setup failed: {e}");
+                // Final fallback: temp-dir only logger. If this also fails, use noop logger.
+                let fallback_dir = std::env::temp_dir().join("protoagent-session-logs");
+                let fallback_ndjson =
+                    fallback_dir.join(format!("session_fallback_{session_id}_{timestamp}.ndjson"));
+                let fallback_timeline = fallback_dir.join(format!(
+                    "session_fallback_{session_id}_{timestamp}.timeline.log"
+                ));
+                let fallback_readable = fallback_dir.join(format!(
+                    "session_fallback_{session_id}_{timestamp}.readable.log"
+                ));
+
+                SessionLogger::new(
+                    session_id.clone(),
+                    vec![fallback_ndjson],
+                    vec![fallback_timeline],
+                    vec![fallback_readable],
+                )
+                .unwrap_or_else(|fallback_err| {
+                    eprintln!("Fallback session logging setup failed: {fallback_err}");
+                    SessionLogger::noop(session_id.clone())
+                })
+            });
+
+        (logger, chat_cancel.clone())
     };
+
+    let hook = ChatUiHook {
+        app: app.clone(),
+        cancel: cancel_for_hook,
+        logger: session_logger,
+    };
+
+    let outcome = agent
+        .prompt(&prompt)
+        .max_turns(8)
+        .with_hook(hook)
+        .await;
 
     map_prompt_outcome(outcome)
 }

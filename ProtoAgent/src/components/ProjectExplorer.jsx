@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 function FileTreeItem({ entry, depth, openFilePath, onFileSelect, expandedDirs, onToggleDir, onContextMenu }) {
   const isExpanded = expandedDirs.has(entry.path);
@@ -63,6 +64,16 @@ export default function ProjectExplorer({ vaultPath, openFilePath, onFileSelect,
   const [contextMenu, setContextMenu] = useState(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState(null);
+  const [treeNonce, setTreeNonce] = useState(0);
+
+  useEffect(() => {
+    const unlisten = listen("vault-tree-changed", () => {
+      setTreeNonce((n) => n + 1);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   const scanPathFor = (entry) =>
     entry.is_dir ? entry.path : entry.path.replace(/[/\\][^/\\]+$/, "") || vaultPath;
@@ -127,7 +138,7 @@ export default function ProjectExplorer({ vaultPath, openFilePath, onFileSelect,
         setTree([]);
       })
       .finally(() => setLoading(false));
-  }, [vaultPath]);
+  }, [vaultPath, treeNonce]);
 
   const handleToggleDir = (path) => {
     setExpandedDirs((prev) => {

@@ -1,4 +1,7 @@
 mod agent_tools;
+mod chat_progress;
+mod markdown_proposals;
+mod markdown_tools;
 mod locality_sensitive_hashing_deduplicate;
 mod metadata_parser;
 mod pairwise_deduplicate;
@@ -10,10 +13,20 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use crate::enrich::EnrichedFile;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 use std::env;
-use rig::{client::CompletionClient, client::EmbeddingsClient, completion::Prompt, providers::openai};
+use markdown_proposals::SharedProposalStore;
+use rig::{
+    client::CompletionClient,
+    client::EmbeddingsClient,
+    completion::Prompt,
+    completion::PromptError,
+    providers::openai,
+};
+use tauri::Emitter;
+use tauri::Manager;
 use rig::vector_store::in_memory_store::InMemoryVectorStore;
 use serde_yaml::Value;
 use walkdir::DirEntry as WalkDirEntry;
@@ -21,6 +34,7 @@ mod test;
 mod enrich;
 use std::collections::{HashMap, HashSet};
 
+use crate::chat_progress::{ChatUiHook, SharedChatCancel};
 use crate::locality_sensitive_hashing_deduplicate::{FileEmbedding, deduplicate_directory, generate_embedded_files};
 use semantic_clustering::semantic_clustering_from_file_embeddings;
 use locality_sensitive_hashing_deduplicate::group_embeddings;
@@ -185,6 +199,17 @@ pub fn get_openai_api_key() -> Result<String, String> {
     
     Err("OpenAI API key not found. Please set OPENAI_API_KEY environment variable or configure it in src-tauri/config.toml".to_string())
 }
+
+fn map_prompt_outcome(result: Result<String, PromptError>) -> Result<String, String> {
+    match result {
+        Ok(s) => Ok(s),
+        Err(e) => match e {
+            PromptError::PromptCancelled { reason, .. } => Ok(format!("Request stopped. {}", reason)),
+            _ => Err(e.to_string()),
+        },
+    }
+}
+
 /// Internal implementation of ask_agent. Used by both the ask_agent command and generate_summaries.
 async fn ask_agent_impl(
     state: Option<&Mutex<VaultIndexCache>>,
@@ -193,6 +218,7 @@ async fn ask_agent_impl(
     vault_path: Option<String>,
     chat_model: String,
     rag_context_top_k: usize,
+    chat_cancel: Option<SharedChatCancel>,
 ) -> Result<String, String> {
     let api_key = get_openai_api_key()?;
     let client: openai::Client = openai::Client::new(api_key).map_err(|e| e.to_string())?;
@@ -223,9 +249,64 @@ async fn ask_agent_impl(
         .map(|p| format!("The user's vault is at: {}. When they ask to find duplicates or related files, call the vault_agent with the vault path and the operation.", p))
         .unwrap_or_else(|| "No vault is selected. If the user asks to find duplicates or related files, ask them to select a vault folder first.".to_string());
 
+    let proposal_store: SharedProposalStore = app.state::<SharedProposalStore>().inner().clone();
+    let propose_create = markdown_tools::ProposeCreateMarkdownTool {
+        app: app.clone(),
+        store: proposal_store.clone(),
+        vault_root: vault_path.clone(),
+    };
+    let propose_edit = markdown_tools::ProposeEditMarkdownTool {
+        app: app.clone(),
+        store: proposal_store,
+        vault_root: vault_path.clone(),
+    };
+    let md_vault_hint = vault_path
+        .as_ref()
+        .map(|p| {
+            format!(
+                "The vault root for markdown paths is: {}. Use paths relative to this root (e.g. Notes/topic.md).",
+                p
+            )
+        })
+        .unwrap_or_else(|| {
+            "No vault is selected—you cannot propose markdown file changes until the user selects a vault folder."
+                .to_string()
+        });
+    let markdown_preamble = format!(
+        "You are a markdown editing specialist. Use propose_create_markdown for NEW files and propose_edit_markdown to replace the ENTIRE contents of an existing file. Use vault-relative paths ending in .md or .markdown. You only have orchestrator/RAG and user messages—write proposals carefully. When proposing an edit, the tool reads the current file to snapshot previous content for review. Saving to disk only happens when the user clicks Accept in the app's pending proposals panel—you cannot save from chat. Do not ask whether to save, proceed, or approve changes in this conversation; you cannot perform that step. If the user wants different wording, invite them to describe edits so you can submit a revised proposal, or they can Reject and ask again. {}",
+        md_vault_hint
+    );
+    let markdown_agent = client
+        .agent(chat_model.as_str())
+        .name("markdown_agent")
+        .description("Creates or edits vault markdown by submitting proposals. The user saves changes only via Accept in the pending proposals panel—not through chat. Do not ask for save/approval in chat; offer revision guidance instead.")
+        .preamble(markdown_preamble.as_str())
+        .tool(propose_create)
+        .tool(propose_edit)
+        .build();
+
+    let coach_preamble = "You are a development coach for people with messy or abundant ideas. Your job is emotional and strategic clarity: help the user decide what to do next when they feel stuck or overwhelmed. \
+        Infer or gently ask what stage they are in (exploring options, committing to a direction, executing, or maintaining/revising). \
+        Surface gaps, contradictions, or weak areas with empathy—not judgment. \
+        Offer concrete, ordered next steps (small wins first). \
+        Suggest short creative exercises when they help unblock thinking. \
+        Ask focused questions—prefer one or a few at a time. \
+        Recommend which notes or themes to revisit; use file names or topics from the orchestrator's context when they appear in the request or retrieved vault documents—do not invent filenames you were not given. \
+        You may suggest what new notes or sections could exist or what existing notes could expand—in prose only. You have no tools to write files. When the user wants an actual vault change, tell them the orchestrator can delegate to markdown_agent for proposals they approve in the app. \
+        Do not summarize whole vaults unless asked; do not run duplicate-file scans or related-file scans—that is vault_agent. Do not create markdown proposals—that is markdown_agent.";
+
+    let development_coach_agent = client
+        .agent(chat_model.as_str())
+        .name("development_coach_agent")
+        .description("Helps when the user feels stuck, has too many ideas, or needs next steps, exercises, and reflection—not for summarizing notes, scanning the vault, or editing files.")
+        .preamble(coach_preamble)
+        .build();
+
     let mut preamble = format!(
         "You are the main orchestrator. The user talks to you. Your job is to understand their intent and delegate to the right specialist. \
-        You have two specialists: summary_agent (for summarization) and vault_agent (for finding duplicates or related files in the vault). \
+        You have four specialists: summary_agent (for summarization), vault_agent (for finding duplicates or related files in the vault), markdown_agent (for creating or editing markdown files via proposals that the user must approve before they are saved), and development_coach_agent (for coaching when the user is overwhelmed, stuck, or needs prioritization, exercises, focused questions, and what to revisit or expand—not for saving files). \
+        When the user needs empathy, structure, or \"what should I do next\" with messy ideas, call development_coach_agent. When they need actual vault edits, call markdown_agent. \
+        When markdown_agent queues changes, approval happens only in the pending proposals panel in the app—not by replying in chat. Do not ask the user to confirm saving in chat. \
         Always call the appropriate agent—never do the work yourself. {vault_hint}"
     );
 
@@ -234,7 +315,9 @@ async fn ask_agent_impl(
         .agent(chat_model.as_str())
         .preamble(&preamble)
         .tool(summary_agent)
-        .tool(vault_agent);
+        .tool(vault_agent)
+        .tool(markdown_agent)
+        .tool(development_coach_agent);
 
     if let (Some(state), Some(ref path)) = (state, vault_path) {
         let need_build = {
@@ -267,17 +350,29 @@ async fn ask_agent_impl(
     }
 
     let agent = agent_builder.build();
-    agent
-        .prompt(&prompt)
-        .max_turns(5)
-        .await
-        .map_err(|e| e.to_string())
+
+    let outcome = if let Some(cancel) = chat_cancel {
+        let hook = ChatUiHook {
+            app: app.clone(),
+            cancel,
+        };
+        agent
+            .prompt(&prompt)
+            .max_turns(8)
+            .with_hook(hook)
+            .await
+    } else {
+        agent.prompt(&prompt).max_turns(8).await
+    };
+
+    map_prompt_outcome(outcome)
 }
 
 #[tauri::command]
 async fn ask_agent(
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<VaultIndexCache>>,
+    cancel_flag: tauri::State<'_, SharedChatCancel>,
     prompt: String,
     vault_path: Option<String>,
     model: Option<String>,
@@ -285,7 +380,17 @@ async fn ask_agent(
 ) -> Result<String, String> {
     let chat_model = resolve_chat_model(model)?;
     let k = resolve_rag_context_top_k(rag_context_top_k);
-    ask_agent_impl(Some(&*state), app, prompt, vault_path, chat_model, k).await
+    cancel_flag.store(false, Ordering::SeqCst);
+    ask_agent_impl(
+        Some(&*state),
+        app,
+        prompt,
+        vault_path,
+        chat_model,
+        k,
+        Some(cancel_flag.inner().clone()),
+    )
+    .await
 }
 
 
@@ -898,7 +1003,7 @@ async fn generate_summaries(
         let markdown_content = read_markdown_contents(&cluster.files)?;
         
         // Call OpenAI Assistant to generate summary
-        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None, chat_model.clone(), DEFAULT_RAG_CONTEXT_TOP_K).await {
+        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None, chat_model.clone(), DEFAULT_RAG_CONTEXT_TOP_K, None).await {
             Ok(s) => s,
             Err(e) => {
                 // Fallback to simple summary if API call fails
@@ -933,7 +1038,7 @@ async fn generate_summaries(
             .join("\n\n")
     );
 
-    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None, chat_model, DEFAULT_RAG_CONTEXT_TOP_K).await {
+    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None, chat_model, DEFAULT_RAG_CONTEXT_TOP_K, None).await {
         Ok(s) => s,
         Err(e) => {
             // Fallback to simple overview if API call fails
@@ -1002,6 +1107,41 @@ fn save_summary_to_vault(vault_path: String, summaries: MasterSummary) -> Result
     Ok(())
 }
 
+#[tauri::command]
+fn cancel_chat(cancel_flag: tauri::State<'_, SharedChatCancel>) {
+    cancel_flag.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn apply_markdown_proposal(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SharedProposalStore>,
+    proposal_id: String,
+) -> Result<String, String> {
+    let path = markdown_proposals::apply_markdown_proposal_impl(&store, &proposal_id)?;
+    app.emit(
+        "vault-tree-changed",
+        serde_json::json!({ "path": path.clone() }),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+#[tauri::command]
+fn reject_markdown_proposal(
+    store: tauri::State<'_, SharedProposalStore>,
+    proposal_id: String,
+) -> Result<(), String> {
+    markdown_proposals::reject_markdown_proposal_impl(&store, &proposal_id)
+}
+
+#[tauri::command]
+fn list_pending_markdown_proposals(
+    store: tauri::State<'_, SharedProposalStore>,
+) -> Result<Vec<markdown_proposals::MarkdownProposalEvent>, String> {
+    markdown_proposals::list_pending_markdown_proposals_impl(&store)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()  
@@ -1017,8 +1157,13 @@ pub fn run() {
             vault_path: None,
             store: None,
         }))
+        .manage(Arc::new(AtomicBool::new(false)) as SharedChatCancel)
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, markdown_proposals::PendingProposal>::new(),
+        )) as SharedProposalStore)
         .invoke_handler(tauri::generate_handler![
             ask_agent,
+            cancel_chat,
             list_chat_models,
             list_directory,
             read_file,
@@ -1031,6 +1176,9 @@ pub fn run() {
             cluster_files_by_type,
             generate_summaries,
             save_summary_to_vault,
+            apply_markdown_proposal,
+            reject_markdown_proposal,
+            list_pending_markdown_proposals,
 
         ])
         .run(tauri::generate_context!())

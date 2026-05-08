@@ -37,4 +37,5 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 rig-core = { version = "0.31.0", features = ["derive"] }
 dotenvy = "0.15.7"
+uuid = { version = "1", features = ["v4"] }
 

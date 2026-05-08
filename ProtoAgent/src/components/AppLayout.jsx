@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import FolderSelector from "./FolderSelector";
 import ProjectExplorer from "./ProjectExplorer";
 import MarkdownEditor from "./MarkdownEditor";
 import ChatPanel from "./ChatPanel";
 import ScanResultsPanel from "./ScanResultsPanel";
+import MarkdownProposalsPanel from "./MarkdownProposalsPanel";
 
 export default function AppLayout() {
   const [vaultPath, setVaultPath] = useState(null);
@@ -13,6 +15,8 @@ export default function AppLayout() {
   const [openFilePath, setOpenFilePath] = useState(null);
   const [scanResults, setScanResults] = useState(null);
   const [resultsPanelCollapsed, setResultsPanelCollapsed] = useState(true);
+  const [markdownProposals, setMarkdownProposals] = useState([]);
+  const [markdownPanelCollapsed, setMarkdownPanelCollapsed] = useState(false);
 
   const handleFolderSelected = (path) => {
     setVaultPath(path);
@@ -28,6 +32,54 @@ export default function AppLayout() {
       unlisten.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    const unlisten = listen("markdown-proposal", (event) => {
+      const payload = event.payload;
+      setMarkdownProposals((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((p) => p.id === payload.id);
+        if (idx >= 0) next[idx] = payload;
+        else next.push(payload);
+        return next;
+      });
+      setMarkdownPanelCollapsed(false);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!vaultPath) {
+      setMarkdownProposals([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const pending = await invoke("list_pending_markdown_proposals");
+        if (
+          cancelled ||
+          !Array.isArray(pending) ||
+          pending.length === 0
+        ) {
+          return;
+        }
+        setMarkdownProposals(pending);
+        setMarkdownPanelCollapsed(false);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultPath]);
+
+  const handleRemoveProposal = (id) => {
+    setMarkdownProposals((prev) => prev.filter((p) => p.id !== id));
+  };
 
   const handleCloseResults = () => {
     setResultsPanelCollapsed(true);
@@ -115,6 +167,7 @@ export default function AppLayout() {
       </aside>
       </div>
 
+      <div className="bottom-panels-stack">
       {/* Bottom panel - Scan results */}
       {scanResults && !resultsPanelCollapsed && (
         <div className="scan-results-container">
@@ -125,6 +178,19 @@ export default function AppLayout() {
           />
         </div>
       )}
+
+      {/* Bottom panel - Markdown proposals */}
+      {markdownProposals.length > 0 && !markdownPanelCollapsed && (
+        <div className="markdown-proposals-container">
+          <MarkdownProposalsPanel
+            proposals={markdownProposals}
+            onRemove={handleRemoveProposal}
+            onAppliedOpenFile={setOpenFilePath}
+            onClosePanel={() => setMarkdownPanelCollapsed(true)}
+          />
+        </div>
+      )}
+      </div>
     </div>
   );
 }

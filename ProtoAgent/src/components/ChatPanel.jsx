@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 const CHAT_MODEL_STORAGE_KEY = "protoagent-chat-model";
 const RAG_CONTEXT_K_STORAGE_KEY = "protoagent-rag-context-top-k";
@@ -31,6 +32,7 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
   const [modelOptions, setModelOptions] = useState([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [ragContextTopK, setRagContextTopK] = useState(() => readStoredRagK());
+  const [progressMessage, setProgressMessage] = useState("");
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -59,13 +61,25 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
     };
   }, []);
 
+  useEffect(() => {
+    const unlisten = listen("chat-progress", (event) => {
+      const p = event.payload;
+      if (p && typeof p.message === "string") {
+        setProgressMessage(p.message);
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, loading, progressMessage]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -73,6 +87,7 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
 
     setInput("");
     setError(null);
+    setProgressMessage("");
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setLoading(true);
 
@@ -92,7 +107,13 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
       ]);
     } finally {
       setLoading(false);
+      setProgressMessage("");
     }
+  };
+
+  const handleStop = () => {
+    if (!loading) return;
+    invoke("cancel_chat").catch(() => {});
   };
 
   const handleKeyDown = (e) => {
@@ -166,6 +187,8 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
               <li>Summarize the current note</li>
               <li>Find duplicate files in my vault</li>
               <li>Find related files</li>
+              <li>Create or edit a vault note (approve in the bottom panel)</li>
+              <li>Get unstuck / plan next steps (development coach)</li>
               <li>Help me brainstorm ideas</li>
             </ul>
           </div>
@@ -187,8 +210,10 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
         {loading && (
           <div className="chat-message chat-message-assistant">
             <span className="chat-message-role">AI</span>
-            <div className="chat-message-content chat-loading">
-              <span>Thinking...</span>
+            <div className="chat-message-content chat-loading" aria-live="polite">
+              <span className="chat-progress-text">
+                {progressMessage || "Thinking…"}
+              </span>
             </div>
           </div>
         )}
@@ -209,14 +234,25 @@ export default function ChatPanel({ vaultPath, openFilePath }) {
           rows={2}
           disabled={loading}
         />
-        <button
-          className="chat-send-btn"
-          onClick={handleSend}
-          disabled={!input.trim() || loading}
-          title="Send (Enter)"
-        >
-          Send
-        </button>
+        <div className="chat-input-buttons">
+          <button
+            type="button"
+            className="chat-stop-btn"
+            onClick={handleStop}
+            disabled={!loading}
+            title="Stop generation"
+          >
+            Stop
+          </button>
+          <button
+            className="chat-send-btn"
+            onClick={handleSend}
+            disabled={!input.trim() || loading}
+            title="Send (Enter)"
+          >
+            Send
+          </button>
+        </div>
       </div>
     </div>
   );

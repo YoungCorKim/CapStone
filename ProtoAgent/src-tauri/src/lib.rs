@@ -21,8 +21,7 @@ use markdown_proposals::SharedProposalStore;
 use rig::{
     client::CompletionClient,
     client::EmbeddingsClient,
-    completion::Prompt,
-    completion::PromptError,
+    completion::{AssistantContent, Message, Prompt, PromptError},
     providers::openai,
 };
 use tauri::Emitter;
@@ -41,8 +40,12 @@ use semantic_clustering::semantic_clustering_from_file_embeddings;
 use locality_sensitive_hashing_deduplicate::group_embeddings;
 use crate::pairwise_deduplicate::identify_duplicate_pairs;
 use uuid::Uuid;
+use rig::completion::message::UserContent;
 
 const TEXT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+const MEMORY_RECENT_TURNS: usize = 10;
+const MEMORY_SUMMARY_TRIGGER_MESSAGES: usize = 24;
+const MEMORY_SUMMARY_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileInfo {
@@ -103,6 +106,120 @@ pub struct MasterSummary {
 pub struct VaultIndexCache {
     pub vault_path: Option<String>,
     pub store: Option<InMemoryVectorStore<rag_index::RagDocument>>,
+}
+
+#[derive(Default, Clone)]
+pub struct SessionMemory {
+    pub rig_history: Vec<Message>,
+    pub rolling_summary: String,
+}
+
+fn extract_text_from_message(message: &Message) -> Option<(String, String)> {
+    match message {
+        Message::User { content } => {
+            let text = content
+                .iter()
+                .filter_map(|item| match item {
+                    UserContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(("User".to_string(), text))
+            }
+        }
+        Message::Assistant { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|item| match item {
+                    AssistantContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(("Assistant".to_string(), text))
+            }
+        }
+    }
+}
+
+fn extract_recent_turns(history: &[Message], max_turns: usize) -> Vec<(String, String)> {
+    let turns = history
+        .iter()
+        .filter_map(extract_text_from_message)
+        .collect::<Vec<_>>();
+    if turns.len() > max_turns {
+        turns[turns.len() - max_turns..].to_vec()
+    } else {
+        turns
+    }
+}
+
+fn compact_text(input: &str, max_chars: usize) -> String {
+    let trimmed = input.trim().replace('\n', " ");
+    if trimmed.chars().count() <= max_chars {
+        trimmed
+    } else {
+        let mut out = trimmed.chars().take(max_chars).collect::<String>();
+        out.push_str("...");
+        out
+    }
+}
+
+fn append_summary(existing: &str, dropped: &[Message]) -> String {
+    let mut lines = Vec::new();
+    for (role, text) in dropped.iter().filter_map(extract_text_from_message) {
+        lines.push(format!("- {}: {}", role, compact_text(&text, 220)));
+    }
+    if lines.is_empty() {
+        return existing.to_string();
+    }
+
+    let mut merged = String::new();
+    if !existing.trim().is_empty() {
+        merged.push_str(existing.trim());
+        merged.push('\n');
+    }
+    merged.push_str("Additional context from earlier turns:\n");
+    merged.push_str(&lines.join("\n"));
+
+    let merged_compact = compact_text(&merged, MEMORY_SUMMARY_MAX_CHARS);
+    merged_compact
+}
+
+fn compact_session_memory(memory: &mut SessionMemory) {
+    if memory.rig_history.len() <= MEMORY_SUMMARY_TRIGGER_MESSAGES {
+        return;
+    }
+    let keep_from = memory
+        .rig_history
+        .len()
+        .saturating_sub(MEMORY_SUMMARY_TRIGGER_MESSAGES);
+    let dropped = memory.rig_history[..keep_from].to_vec();
+    memory.rolling_summary = append_summary(&memory.rolling_summary, &dropped);
+    memory.rig_history = memory.rig_history[keep_from..].to_vec();
+}
+
+fn build_memory_preface(rolling_summary: &str, recent_turns: &[(String, String)]) -> String {
+    let mut sections = Vec::new();
+    if !rolling_summary.trim().is_empty() {
+        sections.push(format!("Conversation summary:\n{}", rolling_summary.trim()));
+    }
+    if !recent_turns.is_empty() {
+        let rendered = recent_turns
+            .iter()
+            .map(|(role, text)| format!("{}: {}", role, compact_text(text, 500)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("Recent conversation:\n{}", rendered));
+    }
+    sections.join("\n\n")
 }
 
 /// Curated OpenAI chat models for the multi-agent stack (IDs align with `rig` `openai::completion` constants).
@@ -221,6 +338,7 @@ async fn ask_agent_impl(
     chat_model: String,
     rag_context_top_k: usize,
     chat_cancel: Option<SharedChatCancel>,
+    chat_history: Option<&mut Vec<Message>>,
 ) -> Result<String, String> {
     let api_key = get_openai_api_key()?;
     let client: openai::Client = openai::Client::new(api_key).map_err(|e| e.to_string())?;
@@ -230,8 +348,7 @@ async fn ask_agent_impl(
         .agent(chat_model.as_str())
         .name("summary_agent")
         .preamble("You are a summarizing agent. Your job is to take the content of one or more \
-            markdown files and produce a summary in the form of markdown. Add a note at the top \
-            marking that it has been summarized by you the summarizing agent.")
+            markdown files and produce a summary in the form of markdown.")
         .build();
 
     // Vault specialist: handles find_duplicates and find_related_files
@@ -309,6 +426,13 @@ async fn ask_agent_impl(
         You have four specialists: summary_agent (for summarization), vault_agent (for finding duplicates or related files in the vault), markdown_agent (for creating or editing markdown files via proposals that the user must approve before they are saved), and development_coach_agent (for coaching when the user is overwhelmed, stuck, or needs prioritization, exercises, focused questions, and what to revisit or expand—not for saving files). \
         When the user needs empathy, structure, or \"what should I do next\" with messy ideas, call development_coach_agent. When they need actual vault edits, call markdown_agent. \
         When markdown_agent queues changes, approval happens only in the pending proposals panel in the app—not by replying in chat. Do not ask the user to confirm saving in chat. \
+        Routing policy (latency-first): default to exactly ONE specialist per user request. \
+        Choose the single best specialist and delegate once. Do NOT chain specialists unless the user explicitly requests multiple outcomes in the same turn. \
+        After a successful specialist/tool result, finalize immediately with a concise response and do not re-delegate. \
+        Second-agent delegation is allowed only if the first specialist hits a hard blocker (for example missing vault path) or the user explicitly asks for a second distinct outcome. \
+        Anti-ping-pong rules: never call development_coach_agent after markdown_agent unless user asks for coaching; never call summary_agent after vault_agent unless user asks for summary; never call vault_agent solely to support markdown edits unless user explicitly requests vault analysis. \
+        If the request is ambiguous between specialists, ask ONE short clarifying question instead of calling multiple agents. \
+        Hard cap: max 1 agent_call per request unless second-agent criteria are met. \
         Always call the appropriate agent—never do the work yourself. {vault_hint}"
     );
 
@@ -355,7 +479,7 @@ async fn ask_agent_impl(
 
     // Create a timestamped NDJSON log file for this prompt session.
     // This is intentionally "best effort": logging should not break the app.
-    let (session_logger, cancel_for_hook) = {
+    let session_logger = {
         let session_id = Uuid::new_v4().to_string();
         let timestamp = Utc::now()
             .format("%Y-%m-%dT%H-%M-%S%.3fZ")
@@ -421,20 +545,50 @@ async fn ask_agent_impl(
                 })
             });
 
-        (logger, chat_cancel.clone())
+        logger
     };
 
-    let hook = ChatUiHook {
-        app: app.clone(),
-        cancel: cancel_for_hook,
-        logger: session_logger,
+    let outcome = if let Some(cancel) = chat_cancel {
+        let hook = ChatUiHook {
+            app: app.clone(),
+            cancel: Some(cancel),
+            logger: session_logger,
+        };
+        if let Some(history) = chat_history {
+            agent
+                .prompt(&prompt)
+                .max_turns(8)
+                .with_history(history)
+                .with_hook(hook)
+                .await
+        } else {
+            agent
+                .prompt(&prompt)
+                .max_turns(8)
+                .with_hook(hook)
+                .await
+        }
+    } else {
+        let hook = ChatUiHook {
+            app: app.clone(),
+            cancel: None,
+            logger: session_logger,
+        };
+        if let Some(history) = chat_history {
+            agent
+                .prompt(&prompt)
+                .max_turns(8)
+                .with_history(history)
+                .with_hook(hook)
+                .await
+        } else {
+            agent
+                .prompt(&prompt)
+                .max_turns(8)
+                .with_hook(hook)
+                .await
+        }
     };
-
-    let outcome = agent
-        .prompt(&prompt)
-        .max_turns(8)
-        .with_hook(hook)
-        .await;
 
     map_prompt_outcome(outcome)
 }
@@ -443,6 +597,7 @@ async fn ask_agent_impl(
 async fn ask_agent(
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<VaultIndexCache>>,
+    memory_state: tauri::State<'_, Mutex<SessionMemory>>,
     cancel_flag: tauri::State<'_, SharedChatCancel>,
     prompt: String,
     vault_path: Option<String>,
@@ -452,16 +607,39 @@ async fn ask_agent(
     let chat_model = resolve_chat_model(model)?;
     let k = resolve_rag_context_top_k(rag_context_top_k);
     cancel_flag.store(false, Ordering::SeqCst);
-    ask_agent_impl(
+    let (mut rig_history, rolling_summary) = {
+        let memory = memory_state.lock().map_err(|e| e.to_string())?;
+        (memory.rig_history.clone(), memory.rolling_summary.clone())
+    };
+    let recent_turns = extract_recent_turns(&rig_history, MEMORY_RECENT_TURNS);
+    let memory_preface = build_memory_preface(&rolling_summary, &recent_turns);
+    let effective_prompt = if memory_preface.is_empty() {
+        prompt.clone()
+    } else {
+        format!(
+            "{memory_preface}\n\nCurrent user request:\n{prompt}\n\nUse recent conversation context to avoid repeating clarification questions when intent is already established."
+        )
+    };
+
+    let result = ask_agent_impl(
         Some(&*state),
         app,
-        prompt,
+        effective_prompt,
         vault_path,
         chat_model,
         k,
         Some(cancel_flag.inner().clone()),
+        Some(&mut rig_history),
     )
-    .await
+    .await;
+
+    if result.is_ok() {
+        let mut memory = memory_state.lock().map_err(|e| e.to_string())?;
+        memory.rig_history = rig_history;
+        compact_session_memory(&mut memory);
+    }
+
+    result
 }
 
 
@@ -1074,7 +1252,7 @@ async fn generate_summaries(
         let markdown_content = read_markdown_contents(&cluster.files)?;
         
         // Call OpenAI Assistant to generate summary
-        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None, chat_model.clone(), DEFAULT_RAG_CONTEXT_TOP_K, None).await {
+        let summary = match ask_agent_impl(Some(&*state), app.clone(), "Summarize: ".to_owned() + &markdown_content, None, chat_model.clone(), DEFAULT_RAG_CONTEXT_TOP_K, None, None).await {
             Ok(s) => s,
             Err(e) => {
                 // Fallback to simple summary if API call fails
@@ -1109,7 +1287,7 @@ async fn generate_summaries(
             .join("\n\n")
     );
 
-    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None, chat_model, DEFAULT_RAG_CONTEXT_TOP_K, None).await {
+    let overview = match ask_agent_impl(Some(&*state), app, "Summarize: ".to_owned() + &master_content, None, chat_model, DEFAULT_RAG_CONTEXT_TOP_K, None, None).await {
         Ok(s) => s,
         Err(e) => {
             // Fallback to simple overview if API call fails
@@ -1228,6 +1406,7 @@ pub fn run() {
             vault_path: None,
             store: None,
         }))
+        .manage(Mutex::new(SessionMemory::default()))
         .manage(Arc::new(AtomicBool::new(false)) as SharedChatCancel)
         .manage(std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::<String, markdown_proposals::PendingProposal>::new(),
